@@ -14,6 +14,7 @@ import (
 	"micelio/internal/partyline"
 	"micelio/internal/ssh"
 	boltstore "micelio/internal/store/bolt"
+	"micelio/internal/transport"
 )
 
 func main() {
@@ -64,7 +65,36 @@ func main() {
 
 	// Start partyline hub
 	hub := partyline.NewHub(cfg.Node.Name)
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	// Create transport manager before hub.Run() to avoid data race on remoteSend.
+	// Manager is created when listen OR bootstrap is configured (supports outbound-only nodes).
+	var mgr *transport.Manager
+	if cfg.Network.Listen != "" || len(cfg.Network.Bootstrap) > 0 {
+		var err2 error
+		mgr, err2 = transport.NewManager(cfg, id, hub)
+		if err2 != nil {
+			log.Fatalf("transport: %v", err2)
+		}
+	}
+
 	go hub.Run()
+
+	if mgr != nil {
+		go func() {
+			if err := mgr.Start(ctx); err != nil {
+				log.Printf("transport: %v", err)
+			}
+		}()
+		if cfg.Network.Listen != "" {
+			log.Printf("Transport listening on %s", cfg.Network.Listen)
+		}
+		if len(cfg.Network.Bootstrap) > 0 {
+			log.Printf("Bootstrapping to %d peers", len(cfg.Network.Bootstrap))
+		}
+	}
 
 	// Start SSH server
 	authKeysPath := filepath.Join(cfg.Node.DataDir, "authorized_keys")
@@ -72,9 +102,6 @@ func main() {
 	if err != nil {
 		log.Fatalf("ssh: %v", err)
 	}
-
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
 
 	go func() {
 		if err := sshServer.Start(ctx); err != nil {
@@ -91,6 +118,9 @@ func main() {
 
 	log.Println("Shutting down...")
 	cancel()
+	if mgr != nil {
+		mgr.Stop()
+	}
 	sshServer.Stop()
 	hub.Stop()
 }

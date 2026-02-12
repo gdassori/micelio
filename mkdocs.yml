@@ -1,0 +1,50 @@
+site_name: Micelio Protocol
+site_url: https://gdassori.github.io/micelio/
+site_description: Protocol specification for the Micelio P2P network
+repo_url: https://github.com/gdassori/micelio
+repo_name: gdassori/micelio
+
+theme:
+  name: material
+  palette:
+    - scheme: slate
+      primary: teal
+      accent: lime
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+    - scheme: default
+      primary: teal
+      accent: lime
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+  features:
+    - content.code.copy
+    - navigation.sections
+    - navigation.expand
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - pymdownx.details
+  - pymdownx.superfences
+  - pymdownx.tabbed:
+      alternate_style: true
+  - tables
+  - toc:
+      permalink: true
+  - attr_list
+  - def_list
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.inlinehilite
+
+nav:
+  - Overview: index.md
+  - Protocol:
+    - Identity: protocol/identity.md
+    - Transport: protocol/transport.md
+    - Messages: protocol/messages.md
+    - Connection Lifecycle: protocol/connection.md
+  - Architecture: architecture.md
