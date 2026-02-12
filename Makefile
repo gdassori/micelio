@@ -3,9 +3,12 @@ CMD      := ./cmd/micelio
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build clean test linux-amd64 linux-arm64 linux-386 darwin-arm64
+.PHONY: all build clean test proto linux-amd64 linux-arm64 linux-386 darwin-arm64
 
 all: build
+
+proto:
+	protoc --go_out=. --go_opt=module=micelio proto/micelio.proto
 
 build:
 	CGO_ENABLED=0 go build -ldflags "$(LDFLAGS)" -o bin/$(BINARY) $(CMD)

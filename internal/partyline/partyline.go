@@ -5,6 +5,12 @@ import (
 	"sync/atomic"
 )
 
+// RemoteMsg is a chat message destined for the P2P transport layer.
+type RemoteMsg struct {
+	Nick string
+	Text string
+}
+
 // Hub manages partyline sessions using channels only (no mutexes).
 // A single goroutine owns the session map; all operations go through channels.
 type Hub struct {
@@ -16,6 +22,8 @@ type Hub struct {
 	who       chan whoReq
 	setNick   chan nickReq
 	stop      chan struct{}
+
+	remoteSend chan<- RemoteMsg // set by transport; nil if no P2P
 }
 
 // Session represents a connected user in the partyline.
@@ -96,6 +104,14 @@ func (h *Hub) Run() {
 			}
 			h.sendAll(sessions, msg.from, line)
 
+			// Forward local user messages to P2P transport
+			if !msg.system && h.remoteSend != nil {
+				select {
+				case h.remoteSend <- RemoteMsg{Nick: msg.from.Nick, Text: msg.text}:
+				default:
+				}
+			}
+
 		case req := <-h.who:
 			nicks := make([]string, 0, len(sessions))
 			for _, s := range sessions {
@@ -157,6 +173,21 @@ func (h *Hub) SetNick(s *Session, nick string) string {
 	result := make(chan string, 1)
 	h.setNick <- nickReq{session: s, nick: nick, result: result}
 	return <-result
+}
+
+// SetRemoteSend sets the channel for outgoing messages to the P2P transport layer.
+// Must be called before Run() or before any Broadcast calls.
+func (h *Hub) SetRemoteSend(ch chan<- RemoteMsg) {
+	h.remoteSend = ch
+}
+
+// DeliverRemote injects a message from a remote peer into the local partyline.
+// Delivered as a system message so it is NOT re-forwarded to transport.
+func (h *Hub) DeliverRemote(nick, text string) {
+	h.broadcast <- bcastMsg{
+		text:   fmt.Sprintf("[%s] %s", nick, text),
+		system: true,
+	}
 }
 
 // NodeName returns the hub's node name.

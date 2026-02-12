@@ -64,6 +64,10 @@ bin/micelio
 
 # Override defaults via flags
 bin/micelio -ssh-listen 127.0.0.1:2222 -name my-node -data-dir ~/.micelio
+
+# Connect two nodes
+bin/micelio -name node-a -ssh-listen 127.0.0.1:2222 -config nodeA.toml
+bin/micelio -name node-b -ssh-listen 127.0.0.1:2223 -config nodeB.toml
 ```
 
 On first run, the node creates `~/.micelio/` with:
@@ -125,12 +129,15 @@ micelio/
 ├── cmd/micelio/           # Entry point
 ├── internal/
 │   ├── config/            # TOML config + CLI flags
+│   ├── crypto/            # ED25519→X25519 key conversion
 │   ├── identity/          # ED25519 keypair, NodeID
-│   ├── ssh/               # SSH server, terminal sessions
 │   ├── partyline/         # Chat hub (channel-based, zero mutexes)
-│   └── store/             # Store interface + bbolt implementation
-├── proto/                 # Protobuf definitions (Phase 2+)
-├── plugin/                # Plugin system (Phase 7)
+│   ├── ssh/               # SSH server, terminal sessions
+│   ├── store/             # Store interface + bbolt implementation
+│   └── transport/         # Noise encryption, wire framing, peer management
+├── pkg/proto/             # Generated protobuf Go code
+├── proto/                 # Protobuf definitions
+├── docs/                  # Protocol documentation (MkDocs)
 ├── Makefile
 └── go.mod
 ```
@@ -138,7 +145,7 @@ micelio/
 ## Roadmap
 
 - [x] **Phase 1** — Standalone node with SSH partyline
-- [ ] **Phase 2** — Two nodes, direct connection ([#1](../../issues/1))
+- [x] **Phase 2** — Two nodes, direct connection ([#1](../../issues/1))
 - [ ] **Phase 3** — Peer discovery and mesh formation ([#2](../../issues/2))
 - [ ] **Phase 4** — Gossip protocol ([#3](../../issues/3))
 - [ ] **Phase 5** — Distributed state map with LWW + Lamport clock ([#4](../../issues/4))
