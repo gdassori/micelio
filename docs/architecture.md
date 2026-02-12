@@ -77,13 +77,30 @@ Provides human access to the partyline via SSH. Handles public key authenticatio
 
 Manages all peer connections. Responsibilities:
 
-- **Listening** for inbound TCP connections (if `network.listen` is configured).
+- **Listening** for inbound TCP connections (if `network.listen` is configured). Inbound connections are rejected early (before handshake) when at `MaxPeers` capacity.
 - **Dialing** bootstrap peers with exponential backoff.
 - **Noise handshake** and PeerHello exchange for each connection.
+- **Address advertising:** determines the address to advertise to peers. Prefers `network.advertise_addr` if set; otherwise uses the bound listen address, but suppresses wildcard addresses (`0.0.0.0`, `::`) since peers cannot reach them.
 - **Fanout loop:** reads from the Hub's `remoteSend` channel and distributes messages to all connected peers.
-- **Peer lifecycle:** adds/removes peers, prevents duplicates.
+- **Peer lifecycle:** adds/removes peers, prevents duplicates, enforces `MaxPeers`.
+- **Peer discovery:** exchanges known peers via PeerExchange messages and auto-dials discovered peers (excluding bootstrap addresses, which are managed separately by `dialWithBackoff`).
 
 **Source:** `internal/transport/`
+
+### Discovery
+
+Automatic peer discovery and mesh formation. The Manager maintains a `knownPeers` table (in-memory, optionally persisted to bbolt) that tracks all known peers with their addresses, reachability, public keys, and backoff state.
+
+Two loops drive discovery:
+
+- **Exchange loop** (`exchange_interval`, default 30s): periodically sends PeerExchange messages to all connected peers, sharing the list of known reachable peers.
+- **Discovery loop** (`discovery_interval`, default 10s): scans `knownPeers` for dial candidates — peers that are reachable, not already connected, not currently being dialed, not a bootstrap address, and whose backoff has elapsed. Up to 3 candidates per tick are dialed with random jitter. Bootstrap addresses are excluded because `dialWithBackoff` already handles their reconnection lifecycle.
+
+Incoming PeerInfo entries are validated: the `node_id` must equal `hex(SHA-256(ed25519_pubkey))`. Entries with mismatched IDs, wildcard addresses (`0.0.0.0`, `::`), or empty addresses are rejected to prevent peer table poisoning.
+
+Exponential backoff (`min(2^(failCount-1), 30)` seconds) prevents connection storms to unreachable peers. Backoff resets on successful connection. Peer records are persisted to bbolt (if available) so discovery state survives restarts.
+
+**Source:** `internal/transport/discovery.go`
 
 ### Peer
 
@@ -144,7 +161,10 @@ Peer.recvLoop():
   1. Unmarshal Envelope protobuf
   2. Check seen set (dedup by message_id)
   3. Verify ED25519 signature
-  4. Dispatch by msg_type
+  4. Verify sender_id matches peer
+  5. Dispatch by msg_type:
+     - MsgTypeChat (3) → handleChat
+     - MsgTypePeerExchange (4) → handlePeerExchange
         │
         ▼
 Peer.handleChat():
@@ -168,7 +188,10 @@ SSH session sender goroutine:
 | `Manager.Start()` | Node lifetime (blocks on ctx) | — |
 | `Manager.listenLoop()` | Node lifetime | — |
 | `Manager.fanoutLoop()` | Node lifetime | — |
+| `Manager.exchangeLoop()` | Node lifetime | — |
+| `Manager.discoveryLoop()` | Node lifetime | — |
 | `Manager.dialWithBackoff()` | One per bootstrap addr | Backoff timer |
+| `Manager.dialDiscovered()` | Per-discovered-peer dial attempt | — |
 | `Peer.sendLoop()` | Per-connection | — |
 | `Peer.recvLoop()` | Per-connection | — |
 | `Peer.cleanupSeenLoop()` | Per-connection | Seen set cleanup |
@@ -196,6 +219,28 @@ All spokes bootstrap to the center. Messages from the center reach all spokes. M
 ```
 
 The bridge has no listen port. It dials both centers. Messages from the bridge reach both centers. Messages do not cross networks (no gossip relay in Phase 2).
+
+### Auto-Mesh via Discovery (Phase 3)
+
+```
+  A ←──→ B ←──→ C
+  │              │
+  └──────────────┘  (discovered via PeerExchange)
+```
+
+Nodes that share a common bootstrap peer will discover each other via PeerExchange messages and automatically form direct connections. For example: A bootstraps to B, C bootstraps to B; B tells A about C and vice versa; A and C connect directly, forming a full mesh.
+
+Discovery also works transitively across longer chains:
+
+```
+  A → B → C → D → E  (bootstrap chain)
+         ↓
+  A ←→ B ←→ C ←→ D ←→ E
+  │    │    │    │    │
+  └────┴────┴────┴────┘  (full mesh via PeerExchange)
+```
+
+PeerExchange propagates peer info along the chain. Within a few exchange+discovery cycles, all nodes discover each other and form direct connections, regardless of how far apart they were in the initial topology.
 
 ### Future: Full Mesh with Gossip (Phase 4)
 

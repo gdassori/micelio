@@ -5,9 +5,24 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
+
+// Duration wraps time.Duration for TOML string unmarshaling (e.g. "30s", "5m").
+// A zero-value Duration means "not configured" — callers should apply their own default.
+// This is set automatically by Defaults(); it only stays zero when constructing
+// configs manually (e.g. in tests) without calling Defaults().
+type Duration struct {
+	time.Duration
+}
+
+func (d *Duration) UnmarshalText(text []byte) error {
+	var err error
+	d.Duration, err = time.ParseDuration(string(text))
+	return err
+}
 
 type Config struct {
 	Node    NodeConfig    `toml:"node"`
@@ -26,9 +41,12 @@ type SSHConfig struct {
 }
 
 type NetworkConfig struct {
-	Listen    string   `toml:"listen"`
-	Bootstrap []string `toml:"bootstrap"`
-	MaxPeers  int      `toml:"max_peers"`
+	Listen            string   `toml:"listen"`
+	AdvertiseAddr     string   `toml:"advertise_addr"` // explicit host:port to advertise; overrides Listen
+	Bootstrap         []string `toml:"bootstrap"`
+	MaxPeers          int      `toml:"max_peers"`
+	ExchangeInterval  Duration `toml:"exchange_interval"`  // peer exchange period; 0 → 30s default
+	DiscoveryInterval Duration `toml:"discovery_interval"` // discovery scan period; 0 → 10s default
 }
 
 // Defaults returns a Config with sane defaults.
@@ -46,7 +64,9 @@ func Defaults() *Config {
 			Listen: "0.0.0.0:2222",
 		},
 		Network: NetworkConfig{
-			MaxPeers: 15,
+			MaxPeers:          15,
+			ExchangeInterval:  Duration{30 * time.Second},
+			DiscoveryInterval: Duration{10 * time.Second},
 		},
 	}
 }

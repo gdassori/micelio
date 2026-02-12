@@ -25,6 +25,7 @@ const (
 	MsgTypePeerHello    uint32 = 1
 	MsgTypePeerHelloAck uint32 = 2
 	MsgTypeChat         uint32 = 3
+	MsgTypePeerExchange uint32 = 4
 
 	seenTTL     = 5 * time.Minute
 	seenCleanup = 1 * time.Minute
@@ -40,6 +41,13 @@ type Peer struct {
 	localID    *identity.Identity
 	hub        *partyline.Hub
 	initiator  bool
+
+	// Metadata from PeerHello exchange
+	remoteReachable  bool
+	remoteListenAddr string
+
+	// Callback for PeerExchange messages (set by Manager)
+	onPeerExchange func(nodeID string, infos []*pb.PeerInfo)
 
 	sendCh chan []byte // framed envelope bytes ready to write
 	done   chan struct{}
@@ -203,9 +211,22 @@ func (p *Peer) recvLoop() error {
 		switch env.MsgType {
 		case MsgTypeChat:
 			p.handleChat(&env)
+		case MsgTypePeerExchange:
+			p.handlePeerExchange(&env)
 		default:
 			log.Printf("peer %s: unknown msg_type %d", p.NodeID, env.MsgType)
 		}
+	}
+}
+
+func (p *Peer) handlePeerExchange(env *pb.Envelope) {
+	var px pb.PeerExchange
+	if err := proto.Unmarshal(env.Payload, &px); err != nil {
+		log.Printf("peer %s: unmarshal peer_exchange: %v", p.NodeID, err)
+		return
+	}
+	if p.onPeerExchange != nil {
+		p.onPeerExchange(p.NodeID, px.Peers)
 	}
 }
 
@@ -295,6 +316,8 @@ func (p *Peer) verifyPeerIdentity(hello *pb.PeerHello) error {
 
 	p.NodeID = hello.NodeId
 	p.edPubKey = pubKey
+	p.remoteReachable = hello.Reachable
+	p.remoteListenAddr = hello.ListenAddr
 	return nil
 }
 

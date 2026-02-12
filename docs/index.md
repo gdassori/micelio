@@ -26,12 +26,13 @@ From bottom to top:
 
 ## Current Status
 
-The protocol is implemented through Phase 2:
+The protocol is implemented through Phase 3:
 
 - **Phase 1** — Standalone node: identity generation, SSH partyline, bbolt storage.
 - **Phase 2** — Direct connections: Noise-encrypted TCP, protobuf wire protocol, PeerHello handshake, bidirectional chat relay, message signing, deduplication.
+- **Phase 3** — Peer discovery: PeerExchange messages, automatic mesh formation, persistent peer table (bbolt), exponential backoff, MaxPeers enforcement, advertise address support.
 
-Phases 3-7 (peer discovery, gossip, distributed state, tagging, plugins) are planned but not yet implemented. Messages currently propagate only to directly connected peers — there is no multi-hop relay.
+Phases 4-7 (gossip relay, distributed state, tagging, plugins) are planned but not yet implemented. Messages currently propagate only to directly connected peers — there is no multi-hop relay.
 
 ## Quick Reference
 

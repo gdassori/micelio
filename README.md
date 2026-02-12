@@ -104,11 +104,14 @@ listen = "0.0.0.0:2222"
 
 [network]
 listen = "0.0.0.0:4000"
+advertise_addr = "203.0.113.10:4000"  # explicit public address (optional)
 bootstrap = [
     "seed1.example.com:4000",
     "seed2.example.com:4000"
 ]
 max_peers = 15
+exchange_interval = "30s"   # peer exchange period
+discovery_interval = "10s"  # discovery scan period
 ```
 
 CLI flags take precedence over config file values.
@@ -134,7 +137,7 @@ micelio/
 │   ├── partyline/         # Chat hub (channel-based, zero mutexes)
 │   ├── ssh/               # SSH server, terminal sessions
 │   ├── store/             # Store interface + bbolt implementation
-│   └── transport/         # Noise encryption, wire framing, peer management
+│   └── transport/         # Noise encryption, wire framing, peer management, discovery
 ├── pkg/proto/             # Generated protobuf Go code
 ├── proto/                 # Protobuf definitions
 ├── docs/                  # Protocol documentation (MkDocs)
@@ -146,7 +149,7 @@ micelio/
 
 - [x] **Phase 1** — Standalone node with SSH partyline
 - [x] **Phase 2** — Two nodes, direct connection ([#1](../../issues/1))
-- [ ] **Phase 3** — Peer discovery and mesh formation ([#2](../../issues/2))
+- [x] **Phase 3** — Peer discovery and mesh formation ([#2](../../issues/2))
 - [ ] **Phase 4** — Gossip protocol ([#3](../../issues/3))
 - [ ] **Phase 5** — Distributed state map with LWW + Lamport clock ([#4](../../issues/4))
 - [ ] **Phase 6** — Tagging and desired state ([#5](../../issues/5))
