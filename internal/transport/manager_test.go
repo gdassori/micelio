@@ -14,6 +14,10 @@ import (
 	"micelio/internal/transport"
 )
 
+// noDiscovery is an interval large enough to prevent auto-mesh during tests
+// that rely on specific topologies (star, bridge).
+var noDiscovery = config.Duration{Duration: 1 * time.Hour}
+
 // drainFor discards messages from ch for duration d.
 func drainFor(ch <-chan string, d time.Duration) {
 	timer := time.NewTimer(d)
@@ -70,7 +74,7 @@ func TestTwoNodeChat(t *testing.T) {
 		Node:    config.NodeConfig{Name: "node-b", DataDir: dirB},
 		Network: config.NetworkConfig{Listen: "127.0.0.1:0"},
 	}
-	mgrB, err := transport.NewManager(cfgB, idB, hubB)
+	mgrB, err := transport.NewManager(cfgB, idB, hubB, nil)
 	if err != nil {
 		t.Fatalf("manager B: %v", err)
 	}
@@ -99,7 +103,7 @@ func TestTwoNodeChat(t *testing.T) {
 			Bootstrap: []string{mgrB.Addr()},
 		},
 	}
-	mgrA, err := transport.NewManager(cfgA, idA, hubA)
+	mgrA, err := transport.NewManager(cfgA, idA, hubA, nil)
 	if err != nil {
 		t.Fatalf("manager A: %v", err)
 	}
@@ -198,10 +202,14 @@ func TestTenNodeStar(t *testing.T) {
 
 	// Create manager for node 0 (center) before hub.Run() to avoid data race on remoteSend.
 	cfg0 := &config.Config{
-		Node:    config.NodeConfig{Name: "node-0", DataDir: nodes[0].id.NodeID},
-		Network: config.NetworkConfig{Listen: "127.0.0.1:0"},
+		Node: config.NodeConfig{Name: "node-0", DataDir: nodes[0].id.NodeID},
+		Network: config.NetworkConfig{
+			Listen:            "127.0.0.1:0",
+			ExchangeInterval:  noDiscovery,
+			DiscoveryInterval: noDiscovery,
+		},
 	}
-	mgr0, err := transport.NewManager(cfg0, nodes[0].id, nodes[0].hub)
+	mgr0, err := transport.NewManager(cfg0, nodes[0].id, nodes[0].hub, nil)
 	if err != nil {
 		t.Fatalf("manager 0: %v", err)
 	}
@@ -226,11 +234,13 @@ func TestTenNodeStar(t *testing.T) {
 		cfg := &config.Config{
 			Node: config.NodeConfig{Name: fmt.Sprintf("node-%d", i)},
 			Network: config.NetworkConfig{
-				Listen:    "127.0.0.1:0",
-				Bootstrap: []string{centerAddr},
+				Listen:            "127.0.0.1:0",
+				Bootstrap:         []string{centerAddr},
+				ExchangeInterval:  noDiscovery,
+				DiscoveryInterval: noDiscovery,
 			},
 		}
-		mgr, err := transport.NewManager(cfg, nodes[i].id, nodes[i].hub)
+		mgr, err := transport.NewManager(cfg, nodes[i].id, nodes[i].hub, nil)
 		if err != nil {
 			t.Fatalf("manager %d: %v", i, err)
 		}
@@ -391,10 +401,14 @@ func TestOutboundBridge(t *testing.T) {
 	// startCenter creates manager, starts hub, starts listener, returns address.
 	startCenter := func(n *testNode, name string) string {
 		cfg := &config.Config{
-			Node:    config.NodeConfig{Name: name},
-			Network: config.NetworkConfig{Listen: "127.0.0.1:0"},
+			Node: config.NodeConfig{Name: name},
+			Network: config.NetworkConfig{
+				Listen:            "127.0.0.1:0",
+				ExchangeInterval:  noDiscovery,
+				DiscoveryInterval: noDiscovery,
+			},
 		}
-		mgr, err := transport.NewManager(cfg, n.id, n.hub)
+		mgr, err := transport.NewManager(cfg, n.id, n.hub, nil)
 		if err != nil {
 			t.Fatalf("manager %s: %v", name, err)
 		}
@@ -416,11 +430,13 @@ func TestOutboundBridge(t *testing.T) {
 		cfg := &config.Config{
 			Node: config.NodeConfig{Name: name},
 			Network: config.NetworkConfig{
-				Listen:    "127.0.0.1:0",
-				Bootstrap: []string{centerAddr},
+				Listen:            "127.0.0.1:0",
+				Bootstrap:         []string{centerAddr},
+				ExchangeInterval:  noDiscovery,
+				DiscoveryInterval: noDiscovery,
 			},
 		}
-		mgr, err := transport.NewManager(cfg, n.id, n.hub)
+		mgr, err := transport.NewManager(cfg, n.id, n.hub, nil)
 		if err != nil {
 			t.Fatalf("manager %s: %v", name, err)
 		}
@@ -459,10 +475,12 @@ func TestOutboundBridge(t *testing.T) {
 	bridgeCfg := &config.Config{
 		Node: config.NodeConfig{Name: "bridge"},
 		Network: config.NetworkConfig{
-			Bootstrap: []string{addrA, addrB},
+			Bootstrap:         []string{addrA, addrB},
+			ExchangeInterval:  noDiscovery,
+			DiscoveryInterval: noDiscovery,
 		},
 	}
-	mgrBridge, err := transport.NewManager(bridgeCfg, bridge.id, bridge.hub)
+	mgrBridge, err := transport.NewManager(bridgeCfg, bridge.id, bridge.hub, nil)
 	if err != nil {
 		t.Fatalf("manager bridge: %v", err)
 	}

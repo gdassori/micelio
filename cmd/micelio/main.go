@@ -74,7 +74,7 @@ func main() {
 	var mgr *transport.Manager
 	if cfg.Network.Listen != "" || len(cfg.Network.Bootstrap) > 0 {
 		var err2 error
-		mgr, err2 = transport.NewManager(cfg, id, hub)
+		mgr, err2 = transport.NewManager(cfg, id, hub, store)
 		if err2 != nil {
 			log.Fatalf("transport: %v", err2)
 		}

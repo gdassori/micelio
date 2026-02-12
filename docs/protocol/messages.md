@@ -65,7 +65,8 @@ The `msg_type` field determines how `payload` should be deserialized.
 | 1 | `MsgTypePeerHello` | `PeerHello` | Initiator → Responder |
 | 2 | `MsgTypePeerHelloAck` | `PeerHello` | Responder → Initiator |
 | 3 | `MsgTypeChat` | `ChatMessage` | Bidirectional |
-| 1-99 | — | Reserved for core protocol | — |
+| 4 | `MsgTypePeerExchange` | `PeerExchange` | Bidirectional |
+| 5-99 | — | Reserved for core protocol | — |
 | 1000+ | — | Reserved for plugins (Phase 7) | — |
 
 ## PeerHello
@@ -91,7 +92,7 @@ The same protobuf type is used for both `PeerHello` (msg_type=1) and `PeerHelloA
 | `version` | string | Protocol version string (e.g., `"0.1.0"`). |
 | `tags` | repeated string | Arbitrary labels for this node (e.g., `["EU", "prod"]`). |
 | `reachable` | bool | `true` if this node accepts inbound connections. |
-| `listen_addr` | string | The `host:port` this node listens on. Empty if not reachable. |
+| `listen_addr` | string | The advertised `host:port` for this node. Empty if not reachable. Uses `network.advertise_addr` if set, otherwise the bound listen address (wildcard addresses like `0.0.0.0` are not advertised). |
 | `ed25519_pubkey` | bytes | Raw 32-byte ED25519 public key. |
 
 !!! important
@@ -114,6 +115,49 @@ message ChatMessage {
 | `nick` | string | Display name of the user who sent the message. |
 | `text` | string | The message content. |
 | `timestamp` | uint64 | Unix timestamp (seconds) when the message was created. |
+
+## PeerExchange
+
+Carries a list of known reachable peers for automatic mesh formation (Phase 3).
+
+```protobuf
+message PeerInfo {
+    string node_id        = 1;
+    string addr           = 2;
+    bool   reachable      = 3;
+    bytes  ed25519_pubkey = 4;
+    uint64 last_seen      = 5;
+}
+
+message PeerExchange {
+    repeated PeerInfo peers = 1;
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
+| `node_id` | string | Node ID of the known peer (64 hex chars). |
+| `addr` | string | The `host:port` the peer listens on. |
+| `reachable` | bool | `true` if the peer accepts inbound connections. |
+| `ed25519_pubkey` | bytes | Raw 32-byte ED25519 public key of the peer. |
+| `last_seen` | uint64 | Unix timestamp (seconds) when this peer was last seen. |
+
+### PeerExchange Flow
+
+PeerExchange messages are sent in two scenarios:
+
+1. **On connect:** Immediately after a new peer completes the PeerHello exchange and is added to the peer map, the manager sends a PeerExchange containing all known reachable peers (excluding the recipient).
+2. **Periodically:** Every `exchange_interval` (default 30s), the manager sends a PeerExchange to all connected peers.
+
+When a PeerExchange is received:
+
+1. The peer's receive loop deserializes the `PeerExchange` payload.
+2. The manager's `mergeDiscoveredPeers` method validates each `PeerInfo` entry:
+    - Entries for self, non-reachable peers, empty addresses, or wildcard addresses (`0.0.0.0`, `::`) are skipped.
+    - The `node_id` must equal `hex(SHA-256(ed25519_pubkey))`. Entries with mismatched IDs are rejected (prevents poisoning the peer table with invalid identities).
+    - Valid entries are added to the known peers table, or updated if the `last_seen` timestamp is newer.
+3. The discovery loop (every `discovery_interval`, default 10s) scans the known peers table for candidates: reachable, not already connected, not currently being dialed, not a bootstrap address (already managed by `dialWithBackoff`), and backoff elapsed.
+4. Up to 3 candidates per tick are dialed with random jitter (0-2s).
 
 ### Chat Message Flow
 

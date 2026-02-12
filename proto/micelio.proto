@@ -43,3 +43,17 @@ message ChatMessage {
     string text      = 2;
     uint64 timestamp = 3;
 }
+
+// PeerInfo describes a known peer for exchange.
+message PeerInfo {
+    string node_id        = 1;
+    string addr           = 2;
+    bool   reachable      = 3;
+    bytes  ed25519_pubkey = 4;
+    uint64 last_seen      = 5;
+}
+
+// PeerExchange carries a list of known peers (msg_type=4).
+message PeerExchange {
+    repeated PeerInfo peers = 1;
+}

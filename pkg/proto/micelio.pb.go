@@ -348,6 +348,128 @@ func (x *ChatMessage) GetTimestamp() uint64 {
 	return 0
 }
 
+// PeerInfo describes a known peer for exchange.
+type PeerInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	NodeId        string                 `protobuf:"bytes,1,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`
+	Addr          string                 `protobuf:"bytes,2,opt,name=addr,proto3" json:"addr,omitempty"`
+	Reachable     bool                   `protobuf:"varint,3,opt,name=reachable,proto3" json:"reachable,omitempty"`
+	Ed25519Pubkey []byte                 `protobuf:"bytes,4,opt,name=ed25519_pubkey,json=ed25519Pubkey,proto3" json:"ed25519_pubkey,omitempty"`
+	LastSeen      uint64                 `protobuf:"varint,5,opt,name=last_seen,json=lastSeen,proto3" json:"last_seen,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PeerInfo) Reset() {
+	*x = PeerInfo{}
+	mi := &file_proto_micelio_proto_msgTypes[4]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeerInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeerInfo) ProtoMessage() {}
+
+func (x *PeerInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_micelio_proto_msgTypes[4]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeerInfo.ProtoReflect.Descriptor instead.
+func (*PeerInfo) Descriptor() ([]byte, []int) {
+	return file_proto_micelio_proto_rawDescGZIP(), []int{4}
+}
+
+func (x *PeerInfo) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+func (x *PeerInfo) GetAddr() string {
+	if x != nil {
+		return x.Addr
+	}
+	return ""
+}
+
+func (x *PeerInfo) GetReachable() bool {
+	if x != nil {
+		return x.Reachable
+	}
+	return false
+}
+
+func (x *PeerInfo) GetEd25519Pubkey() []byte {
+	if x != nil {
+		return x.Ed25519Pubkey
+	}
+	return nil
+}
+
+func (x *PeerInfo) GetLastSeen() uint64 {
+	if x != nil {
+		return x.LastSeen
+	}
+	return 0
+}
+
+// PeerExchange carries a list of known peers (msg_type=4).
+type PeerExchange struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Peers         []*PeerInfo            `protobuf:"bytes,1,rep,name=peers,proto3" json:"peers,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *PeerExchange) Reset() {
+	*x = PeerExchange{}
+	mi := &file_proto_micelio_proto_msgTypes[5]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *PeerExchange) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*PeerExchange) ProtoMessage() {}
+
+func (x *PeerExchange) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_micelio_proto_msgTypes[5]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use PeerExchange.ProtoReflect.Descriptor instead.
+func (*PeerExchange) Descriptor() ([]byte, []int) {
+	return file_proto_micelio_proto_rawDescGZIP(), []int{5}
+}
+
+func (x *PeerExchange) GetPeers() []*PeerInfo {
+	if x != nil {
+		return x.Peers
+	}
+	return nil
+}
+
 var File_proto_micelio_proto protoreflect.FileDescriptor
 
 const file_proto_micelio_proto_rawDesc = "" +
@@ -382,7 +504,15 @@ const file_proto_micelio_proto_rawDesc = "" +
 	"\vChatMessage\x12\x12\n" +
 	"\x04nick\x18\x01 \x01(\tR\x04nick\x12\x12\n" +
 	"\x04text\x18\x02 \x01(\tR\x04text\x12\x1c\n" +
-	"\ttimestamp\x18\x03 \x01(\x04R\ttimestampB\x13Z\x11micelio/pkg/protob\x06proto3"
+	"\ttimestamp\x18\x03 \x01(\x04R\ttimestamp\"\x99\x01\n" +
+	"\bPeerInfo\x12\x17\n" +
+	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x12\n" +
+	"\x04addr\x18\x02 \x01(\tR\x04addr\x12\x1c\n" +
+	"\treachable\x18\x03 \x01(\bR\treachable\x12%\n" +
+	"\x0eed25519_pubkey\x18\x04 \x01(\fR\red25519Pubkey\x12\x1b\n" +
+	"\tlast_seen\x18\x05 \x01(\x04R\blastSeen\"7\n" +
+	"\fPeerExchange\x12'\n" +
+	"\x05peers\x18\x01 \x03(\v2\x11.micelio.PeerInfoR\x05peersB\x13Z\x11micelio/pkg/protob\x06proto3"
 
 var (
 	file_proto_micelio_proto_rawDescOnce sync.Once
@@ -396,19 +526,22 @@ func file_proto_micelio_proto_rawDescGZIP() []byte {
 	return file_proto_micelio_proto_rawDescData
 }
 
-var file_proto_micelio_proto_msgTypes = make([]protoimpl.MessageInfo, 4)
+var file_proto_micelio_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
 var file_proto_micelio_proto_goTypes = []any{
 	(*Envelope)(nil),     // 0: micelio.Envelope
 	(*PeerHello)(nil),    // 1: micelio.PeerHello
 	(*PeerHelloAck)(nil), // 2: micelio.PeerHelloAck
 	(*ChatMessage)(nil),  // 3: micelio.ChatMessage
+	(*PeerInfo)(nil),     // 4: micelio.PeerInfo
+	(*PeerExchange)(nil), // 5: micelio.PeerExchange
 }
 var file_proto_micelio_proto_depIdxs = []int32{
-	0, // [0:0] is the sub-list for method output_type
-	0, // [0:0] is the sub-list for method input_type
-	0, // [0:0] is the sub-list for extension type_name
-	0, // [0:0] is the sub-list for extension extendee
-	0, // [0:0] is the sub-list for field type_name
+	4, // 0: micelio.PeerExchange.peers:type_name -> micelio.PeerInfo
+	1, // [1:1] is the sub-list for method output_type
+	1, // [1:1] is the sub-list for method input_type
+	1, // [1:1] is the sub-list for extension type_name
+	1, // [1:1] is the sub-list for extension extendee
+	0, // [0:1] is the sub-list for field type_name
 }
 
 func init() { file_proto_micelio_proto_init() }
@@ -422,7 +555,7 @@ func file_proto_micelio_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_micelio_proto_rawDesc), len(file_proto_micelio_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   4,
+			NumMessages:   6,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

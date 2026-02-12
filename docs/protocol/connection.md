@@ -8,6 +8,9 @@ This page describes the full lifecycle of a peer connection: from TCP dial throu
 TCP Connect
     │
     ▼
+MaxPeers Pre-Check (inbound only)
+    │
+    ▼
 Noise XX Handshake (3 messages)
     │
     ▼
@@ -17,7 +20,10 @@ PeerHello / PeerHelloAck Exchange
 Identity Verification (3 checks)
     │
     ▼
-Duplicate Connection Check
+Duplicate / MaxPeers Check
+    │
+    ▼
+PeerExchange (initial)
     │
     ▼
 Steady State (send/recv loops)
@@ -31,10 +37,14 @@ Disconnect + Cleanup
 Connections are established over TCP. The **initiator** (dialer) opens a TCP connection to the **responder** (listener).
 
 - Dial timeout: **10 seconds**.
-- The initiator is the node that has the responder's address in its `bootstrap` list.
+- The initiator is the node that has the responder's address in its `bootstrap` list or discovered it via PeerExchange.
 - The responder accepts connections on the address specified by `network.listen`.
 
 Nodes with no `network.listen` address are **outbound-only**: they can dial peers but cannot accept inbound connections. This is the expected mode for nodes behind NAT or firewalls.
+
+### MaxPeers Pre-Check (Inbound Only)
+
+For inbound connections, the responder performs a quick capacity check **before** the Noise handshake. If `MaxPeers > 0` and the node is already at capacity, the TCP connection is closed immediately to avoid wasting crypto work. This is an optimization — the definitive check happens later in `addPeer`.
 
 ## Noise Handshake
 
@@ -103,11 +113,20 @@ The hello envelope's signature is verified against the `ed25519_pubkey` from the
     - Without Check 2: an attacker can impersonate another node's signing identity.
     - Without Check 3: a node could present a stolen public key without possessing the private key.
 
-## Duplicate Connection Prevention
+## Duplicate and MaxPeers Check
 
-After a successful PeerHello exchange, the manager checks if a peer with the same Node ID is already connected.
+After a successful PeerHello exchange, the manager runs `addPeer`, which performs two checks:
 
-If a duplicate is detected, the **newer connection is dropped**. This prevents two nodes from maintaining multiple parallel connections to each other (which could happen when both dial each other simultaneously).
+1. **Duplicate prevention.** If a peer with the same Node ID is already connected, the newer connection is rejected. This prevents two nodes from maintaining multiple parallel connections (which could happen when both dial each other simultaneously).
+2. **MaxPeers enforcement.** If `MaxPeers > 0` and the node has reached its peer limit, the new connection is rejected. This applies to both inbound and outbound connections.
+
+On rejection, the connection is closed and the reason is logged.
+
+## Initial PeerExchange
+
+Immediately after a peer is successfully added, the manager sends an initial [PeerExchange](messages.md#peerexchange) message containing all known reachable peers (excluding the recipient). This kickstarts discovery — the new peer learns about the rest of the network without waiting for the next periodic exchange tick.
+
+The manager also updates its own known peers table with the new peer's address, reachability, and public key, resetting any prior backoff state.
 
 ## Steady State
 
@@ -125,7 +144,11 @@ Reads framed messages from the Noise connection, deserializes the `Envelope`, an
 
 1. **Deduplication check.** If `message_id` has been seen before, the message is dropped.
 2. **Signature verification.** The envelope signature is verified against the peer's ED25519 key.
-3. **Dispatch by type.** Currently only `MsgTypeChat` (type 3) is handled in steady state. Unknown types are logged and dropped.
+3. **Sender verification.** The envelope's `sender_id` must match the peer's Node ID.
+4. **Dispatch by type:**
+    - `MsgTypeChat` (3): Deserialize `ChatMessage`, deliver to local Hub.
+    - `MsgTypePeerExchange` (4): Deserialize `PeerExchange`, merge into known peers table.
+    - Unknown types are logged and dropped.
 
 ### Seen Set Cleanup
 
