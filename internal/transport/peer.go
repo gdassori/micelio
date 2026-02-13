@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"sync"
 	"time"
 
@@ -130,7 +129,7 @@ func (p *Peer) SendRaw(data []byte) bool {
 	case p.sendCh <- data:
 		return true
 	default:
-		log.Printf("peer %s: send buffer full, dropping message", p.NodeID)
+		tlog.Warn("send buffer full", "peer", p.NodeID)
 		return false
 	}
 }
@@ -170,7 +169,7 @@ func (p *Peer) recvLoop() error {
 
 		var env pb.Envelope
 		if err := proto.Unmarshal(data, &env); err != nil {
-			log.Printf("peer %s: unmarshal envelope: %v", p.NodeID, err)
+			tlog.Error("unmarshal envelope", "peer", p.NodeID, "err", err)
 			continue
 		}
 
@@ -181,11 +180,11 @@ func (p *Peer) recvLoop() error {
 				continue
 			}
 			if !verifySignature(&env, p.edPubKey) {
-				log.Printf("peer %s: invalid signature on peer_exchange %s", p.NodeID, env.MessageId)
+				tlog.Warn("invalid signature on peer_exchange", "peer", p.NodeID, "msg_id", env.MessageId)
 				continue
 			}
 			if env.SenderId != p.NodeID {
-				log.Printf("peer %s: sender_id mismatch on peer_exchange: claimed %s", p.NodeID, env.SenderId)
+				tlog.Warn("sender_id mismatch on peer_exchange", "peer", p.NodeID, "claimed", env.SenderId)
 				continue
 			}
 			p.handlePeerExchange(&env)
@@ -208,7 +207,7 @@ func (p *Peer) recvLoop() error {
 func (p *Peer) handlePeerExchange(env *pb.Envelope) {
 	var px pb.PeerExchange
 	if err := proto.Unmarshal(env.Payload, &px); err != nil {
-		log.Printf("peer %s: unmarshal peer_exchange: %v", p.NodeID, err)
+		tlog.Error("unmarshal peer_exchange", "peer", p.NodeID, "err", err)
 		return
 	}
 	if p.onPeerExchange != nil {

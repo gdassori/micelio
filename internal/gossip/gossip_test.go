@@ -5,6 +5,7 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
+	"micelio/internal/logging"
 	pb "micelio/pkg/proto"
 )
 
@@ -48,6 +50,9 @@ func makeSignedEnvelope(t *testing.T, id testIdentity, msgType uint32, payload [
 }
 
 func TestEngineDedup(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -75,9 +80,23 @@ func TestEngineDedup(t *testing.T) {
 	if delivered != 1 {
 		t.Fatalf("expected 1 delivery, got %d", delivered)
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG 'message received'")
+	}
+	if !capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("expected DEBUG 'message delivered locally'")
+	}
+	if capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("unexpected 'message forwarded' with no peers")
+	}
 }
 
 func TestEngineUnknownSender(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -95,9 +114,23 @@ func TestEngineUnknownSender(t *testing.T) {
 	if delivered != 0 {
 		t.Fatal("expected no delivery for unknown sender")
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG 'message received'")
+	}
+	if !capture.Has(slog.LevelWarn, "dropping message from unknown sender") {
+		t.Error("expected WARN 'dropping message from unknown sender'")
+	}
+	if capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("unexpected 'message delivered locally' for unknown sender")
+	}
 }
 
 func TestEngineAutoLearnKey(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 
 	// Create a sender with a real nodeID = sha256(pubkey)
@@ -139,9 +172,20 @@ func TestEngineAutoLearnKey(t *testing.T) {
 	if entry.TrustLevel != TrustGossipLearned {
 		t.Fatalf("expected TrustGossipLearned, got %d", entry.TrustLevel)
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "auto-learned key") {
+		t.Error("expected DEBUG 'auto-learned key'")
+	}
+	if !capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("expected DEBUG 'message delivered locally'")
+	}
 }
 
 func TestEngineAutoLearnKeyBadHash(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 
 	pub, priv, err := ed25519.GenerateKey(rand.Reader)
@@ -171,9 +215,17 @@ func TestEngineAutoLearnKeyBadHash(t *testing.T) {
 	if delivered != 0 {
 		t.Fatal("expected no delivery when sender_pubkey hash doesn't match sender_id")
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelWarn, "dropping message from unknown sender") {
+		t.Error("expected WARN 'dropping message from unknown sender'")
+	}
 }
 
 func TestEngineInvalidSignature(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 	impostor := newTestIdentity(t)
@@ -201,9 +253,23 @@ func TestEngineInvalidSignature(t *testing.T) {
 	if delivered != 0 {
 		t.Fatal("expected no delivery for invalid signature")
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG 'message received'")
+	}
+	if !capture.Has(slog.LevelWarn, "invalid signature") {
+		t.Error("expected WARN 'invalid signature'")
+	}
+	if capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("unexpected 'message delivered locally' with invalid signature")
+	}
 }
 
 func TestEngineHopCountZero(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -241,9 +307,23 @@ func TestEngineHopCountZero(t *testing.T) {
 	if len(forwarded) != 0 {
 		t.Fatalf("expected no forwarding with hop_count=1, got %d", len(forwarded))
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG 'message received'")
+	}
+	if !capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("expected DEBUG 'message delivered locally'")
+	}
+	if capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("unexpected 'message forwarded' with hop_count=1")
+	}
 }
 
 func TestEngineForwarding(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -290,9 +370,20 @@ func TestEngineForwarding(t *testing.T) {
 	if len(forwarded) == 0 {
 		t.Fatal("expected at least one forward")
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG 'message received'")
+	}
+	if !capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("expected DEBUG 'message forwarded'")
+	}
 }
 
 func TestEngineForwardDecrementHopCount(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -329,9 +420,17 @@ func TestEngineForwardDecrementHopCount(t *testing.T) {
 	if forwarded.HopCount != 4 {
 		t.Fatalf("expected hop_count=4, got %d", forwarded.HopCount)
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("expected DEBUG 'message forwarded'")
+	}
 }
 
 func TestEngineBroadcast(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 
 	var sentTo []string
@@ -364,9 +463,17 @@ func TestEngineBroadcast(t *testing.T) {
 	if len(sentTo) != 2 {
 		t.Fatalf("expected 2 sends, got %d", len(sentTo))
 	}
+
+	// Log assertions: broadcast should not produce errors
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs during broadcast: %d", capture.Count(slog.LevelError))
+	}
 }
 
 func TestEngineBroadcastMarksSeen(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 
 	engine := NewEngine(local.nodeID, func() []PeerHandle { return nil })
@@ -378,9 +485,17 @@ func TestEngineBroadcastMarksSeen(t *testing.T) {
 	if !engine.Seen.Check(env.MessageId) {
 		t.Fatal("expected broadcast message to be marked as seen")
 	}
+
+	// Log assertions
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }
 
 func TestEngineUnknownMsgType(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -410,9 +525,23 @@ func TestEngineUnknownMsgType(t *testing.T) {
 	if forwarded != 1 {
 		t.Fatalf("expected 1 forward for unknown msg_type, got %d", forwarded)
 	}
+
+	// Log assertions: should forward but NOT deliver locally
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG 'message received'")
+	}
+	if !capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("expected DEBUG 'message forwarded'")
+	}
+	if capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("unexpected 'message delivered locally' for unregistered msg_type")
+	}
 }
 
 func TestEngineRateLimiting(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -438,9 +567,20 @@ func TestEngineRateLimiting(t *testing.T) {
 	if delivered == 0 {
 		t.Fatal("expected at least 1 delivery")
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "rate limit exceeded") {
+		t.Error("expected DEBUG 'rate limit exceeded'")
+	}
+	if !capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("expected at least one DEBUG 'message delivered locally'")
+	}
 }
 
 func TestEngineFanoutLimit(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -478,6 +618,14 @@ func TestEngineFanoutLimit(t *testing.T) {
 	if forwarded == 0 {
 		t.Fatal("expected at least 1 forward")
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG 'message received'")
+	}
+	if !capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("expected DEBUG 'message forwarded'")
+	}
 }
 
 func TestEngineStartStop(t *testing.T) {
@@ -491,6 +639,9 @@ func TestEngineStartStop(t *testing.T) {
 }
 
 func TestEngineAutoLearnKeyBadSignature(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	impostor := newTestIdentity(t)
 
@@ -524,9 +675,23 @@ func TestEngineAutoLearnKeyBadSignature(t *testing.T) {
 	if delivered != 0 {
 		t.Fatal("expected no delivery when signature doesn't match sender_pubkey")
 	}
+
+	// Log assertions: key auto-learned (hash matches) but signature fails
+	if !capture.Has(slog.LevelDebug, "auto-learned key") {
+		t.Error("expected DEBUG 'auto-learned key'")
+	}
+	if !capture.Has(slog.LevelWarn, "invalid signature") {
+		t.Error("expected WARN 'invalid signature'")
+	}
+	if capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("unexpected 'message delivered locally' with bad signature")
+	}
 }
 
 func TestEngineHopCountZeroNotForwarded(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -554,9 +719,20 @@ func TestEngineHopCountZeroNotForwarded(t *testing.T) {
 	if forwarded != 0 {
 		t.Fatalf("expected no forwarding with hop_count=0, got %d", forwarded)
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("expected DEBUG 'message delivered locally'")
+	}
+	if capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("unexpected 'message forwarded' with hop_count=0")
+	}
 }
 
 func TestEngineDroppedMessageNotMarkedSeen(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 
 	// Create a sender with a real nodeID = sha256(pubkey)
@@ -608,6 +784,17 @@ func TestEngineDroppedMessageNotMarkedSeen(t *testing.T) {
 	if delivered != 1 {
 		t.Fatalf("expected 1 delivery after retry with sender_pubkey, got %d", delivered)
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelWarn, "dropping message from unknown sender") {
+		t.Error("expected WARN 'dropping message from unknown sender' on first attempt")
+	}
+	if !capture.Has(slog.LevelDebug, "auto-learned key") {
+		t.Error("expected DEBUG 'auto-learned key' on second attempt")
+	}
+	if !capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("expected DEBUG 'message delivered locally' after retry")
+	}
 }
 
 func TestEngineMaxHops(t *testing.T) {
@@ -620,6 +807,9 @@ func TestEngineMaxHops(t *testing.T) {
 }
 
 func TestEngineBroadcastNoPeers(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	engine := NewEngine(local.nodeID, func() []PeerHandle { return nil })
 
@@ -631,9 +821,17 @@ func TestEngineBroadcastNoPeers(t *testing.T) {
 	if !engine.Seen.Has(env.MessageId) {
 		t.Fatal("broadcast with no peers should still mark message as seen")
 	}
+
+	// Log assertions
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }
 
 func TestEngineForwardNoCandidates(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 	sender := newTestIdentity(t)
 
@@ -653,9 +851,23 @@ func TestEngineForwardNoCandidates(t *testing.T) {
 	if forwarded != 0 {
 		t.Fatalf("expected 0 forwards when only peer is sender, got %d", forwarded)
 	}
+
+	// Log assertions: received and delivered, but NOT forwarded
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG 'message received'")
+	}
+	if !capture.Has(slog.LevelDebug, "message delivered locally") {
+		t.Error("expected DEBUG 'message delivered locally'")
+	}
+	if capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("unexpected 'message forwarded' with no candidates")
+	}
 }
 
 func TestEngineAutoLearnKeyBadPubkeySize(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	local := newTestIdentity(t)
 
 	var delivered int
@@ -681,6 +893,11 @@ func TestEngineAutoLearnKeyBadPubkeySize(t *testing.T) {
 	if delivered != 0 {
 		t.Fatal("expected no delivery with bad sender_pubkey size")
 	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelWarn, "dropping message from unknown sender") {
+		t.Error("expected WARN 'dropping message from unknown sender'")
+	}
 }
 
 func TestSeenCacheHasReadOnly(t *testing.T) {
@@ -700,5 +917,22 @@ func TestSeenCacheHasReadOnly(t *testing.T) {
 	}
 	if !cache.Has("msg-1") {
 		t.Fatal("expected Has to return true after Check")
+	}
+}
+
+func TestEngineEmptyEnvelope(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
+	local := newTestIdentity(t)
+	engine := NewEngine(local.nodeID, func() []PeerHandle { return nil })
+
+	// Empty message_id and sender_id
+	env := &pb.Envelope{MsgType: 3, HopCount: 5}
+	engine.HandleIncoming("peer-a", env)
+
+	// Log assertions
+	if !capture.Has(slog.LevelDebug, "envelope rejected: empty id") {
+		t.Error("expected DEBUG 'envelope rejected: empty id'")
 	}
 }

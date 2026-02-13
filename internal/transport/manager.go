@@ -3,7 +3,6 @@ package transport
 import (
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"sync"
 	"time"
@@ -16,10 +15,13 @@ import (
 	mcrypto "micelio/internal/crypto"
 	"micelio/internal/gossip"
 	"micelio/internal/identity"
+	"micelio/internal/logging"
 	"micelio/internal/partyline"
 	"micelio/internal/store"
 	pb "micelio/pkg/proto"
 )
+
+var tlog = logging.For("transport")
 
 // Manager manages all peer connections for a node.
 type Manager struct {
@@ -81,7 +83,7 @@ func NewManager(cfg *config.Config, id *identity.Identity, hub *partyline.Hub, s
 	mgr.gossip.RegisterHandler(MsgTypeChat, func(senderID string, payload []byte) {
 		var chat pb.ChatMessage
 		if err := proto.Unmarshal(payload, &chat); err != nil {
-			log.Printf("gossip: unmarshal chat: %v", err)
+			tlog.Error("unmarshal chat", "err", err)
 			return
 		}
 		hub.DeliverRemote(chat.Nick, chat.Text)
@@ -167,7 +169,7 @@ func (m *Manager) listenLoop(ctx context.Context) {
 			case <-m.done:
 				return
 			default:
-				log.Printf("transport accept: %v", err)
+				tlog.Warn("accept error", "err", err)
 				continue
 			}
 		}
@@ -183,7 +185,7 @@ func (m *Manager) handleInbound(conn net.Conn) {
 		atCapacity := len(m.peers) >= m.cfg.Network.MaxPeers
 		m.mu.Unlock()
 		if atCapacity {
-			log.Printf("rejecting inbound connection from %s: at MaxPeers capacity", conn.RemoteAddr())
+			tlog.Info("rejecting inbound: at capacity", "remote", conn.RemoteAddr())
 			conn.Close()
 			return
 		}
@@ -191,29 +193,29 @@ func (m *Manager) handleInbound(conn net.Conn) {
 
 	nc, peerX25519, err := Handshake(conn, false, m.noiseKey)
 	if err != nil {
-		log.Printf("inbound noise handshake from %s: %v", conn.RemoteAddr(), err)
+		tlog.Warn("inbound handshake failed", "remote", conn.RemoteAddr(), "err", err)
 		conn.Close()
 		return
 	}
 
 	peer := newPeer(nc, peerX25519, m.id, m.hub, false)
 	if err := peer.ExchangeHello(m.helloConfig()); err != nil {
-		log.Printf("inbound hello from %s: %v", conn.RemoteAddr(), err)
+		tlog.Warn("inbound hello failed", "remote", conn.RemoteAddr(), "err", err)
 		nc.Close()
 		return
 	}
 
 	if reason := m.addPeer(peer); reason != "" {
-		log.Printf("rejecting inbound peer %s: %s", peer.NodeID, reason)
+		tlog.Info("rejecting inbound peer", "peer", peer.NodeID, "reason", reason)
 		nc.Close()
 		return
 	}
 
-	log.Printf("peer connected (inbound): %s", peer.NodeID)
+	tlog.Info("peer connected", "peer", peer.NodeID, "direction", "inbound")
 	m.onPeerConnected(peer)
 	peer.Run()
 	m.removePeer(peer.NodeID)
-	log.Printf("peer disconnected: %s", peer.NodeID)
+	tlog.Info("peer disconnected", "peer", peer.NodeID)
 }
 
 func (m *Manager) dialWithBackoff(ctx context.Context, addr string) {
@@ -230,7 +232,7 @@ func (m *Manager) dialWithBackoff(ctx context.Context, addr string) {
 		}
 
 		if err := m.dial(addr); err != nil {
-			log.Printf("dial %s: %v", addr, err)
+			tlog.Debug("dial failed", "addr", addr, "err", err)
 			select {
 			case <-time.After(backoff):
 			case <-ctx.Done():
@@ -270,11 +272,11 @@ func (m *Manager) dial(addr string) error {
 		return fmt.Errorf("peer %s rejected: %s", peer.NodeID, reason)
 	}
 
-	log.Printf("peer connected (outbound): %s", peer.NodeID)
+	tlog.Info("peer connected", "peer", peer.NodeID, "direction", "outbound")
 	m.onPeerConnected(peer)
 	peer.Run()
 	m.removePeer(peer.NodeID)
-	log.Printf("peer disconnected: %s", peer.NodeID)
+	tlog.Info("peer disconnected", "peer", peer.NodeID)
 	return nil
 }
 
@@ -292,7 +294,7 @@ func (m *Manager) fanoutLoop(ctx context.Context) {
 			}
 			payload, err := proto.Marshal(chat)
 			if err != nil {
-				log.Printf("gossip: marshal chat: %v", err)
+				tlog.Error("marshal chat", "err", err)
 				continue
 			}
 

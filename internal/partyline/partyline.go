@@ -3,7 +3,11 @@ package partyline
 import (
 	"fmt"
 	"sync/atomic"
+
+	"micelio/internal/logging"
 )
+
+var plog = logging.For("partyline")
 
 // RemoteMsg is a chat message destined for the P2P transport layer.
 type RemoteMsg struct {
@@ -85,6 +89,7 @@ func (h *Hub) Run() {
 			}
 			sessions[id] = s
 			req.result <- s
+			plog.Debug("session joined", "nick", s.Nick, "id", id)
 
 			h.sendAll(sessions, nil, fmt.Sprintf("* %s joined the partyline", s.Nick))
 
@@ -92,6 +97,7 @@ func (h *Hub) Run() {
 			if _, ok := sessions[s.ID]; ok {
 				delete(sessions, s.ID)
 				close(s.Send)
+				plog.Debug("session left", "nick", s.Nick, "id", s.ID)
 				h.sendAll(sessions, nil, fmt.Sprintf("* %s left the partyline", s.Nick))
 			}
 
@@ -109,6 +115,7 @@ func (h *Hub) Run() {
 				select {
 				case h.remoteSend <- RemoteMsg{Nick: msg.from.Nick, Text: msg.text}:
 				default:
+					plog.Warn("remote send buffer full, message dropped", "nick", msg.from.Nick)
 				}
 			}
 

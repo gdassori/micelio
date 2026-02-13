@@ -3,11 +3,13 @@ package transport_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
 	"micelio/internal/config"
 	"micelio/internal/identity"
+	"micelio/internal/logging"
 	"micelio/internal/partyline"
 	"micelio/internal/transport"
 )
@@ -16,6 +18,9 @@ import (
 // Topology: A knows B (bootstrap), C knows B (bootstrap), but A does NOT know C.
 // After PeerExchange, A should discover C and dial it, forming a full mesh.
 func TestThreeNodeMesh(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	type testNode struct {
 		id      *identity.Identity
 		hub     *partyline.Hub
@@ -170,12 +175,25 @@ func TestThreeNodeMesh(t *testing.T) {
 	if msgC == "" {
 		t.Error("node C did not receive message from A")
 	}
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if !capture.Has(slog.LevelDebug, "received peer exchange") {
+		t.Error("expected DEBUG log: received peer exchange")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }
 
 // TestChainToMesh verifies that a linear chain A→B→C→D→E (bootstrap only)
 // converges into a full mesh via PeerExchange, and that a message from A
 // reaches E (which has no direct bootstrap connection to A).
 func TestChainToMesh(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	const N = 5
 	names := []string{"A", "B", "C", "D", "E"}
 	nicks := []string{"alice", "bob", "carol", "dave", "eve"}
@@ -325,6 +343,16 @@ func TestChainToMesh(t *testing.T) {
 			t.Fatalf("node %s did not receive message from A", names[i])
 		}
 	}
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if !capture.Has(slog.LevelDebug, "received peer exchange") {
+		t.Error("expected DEBUG log: received peer exchange")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }
 
 // TestPeerRecordString verifies the Stringer implementation.
@@ -358,6 +386,9 @@ func TestPeerRecordString(t *testing.T) {
 // TestMaxPeersEnforcement verifies that MaxPeers is enforced.
 // We set MaxPeers=1 on a center node and connect 2 spokes. Only 1 should succeed.
 func TestMaxPeersEnforcement(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	type testNode struct {
 		id     *identity.Identity
 		hub    *partyline.Hub
@@ -454,6 +485,13 @@ func TestMaxPeersEnforcement(t *testing.T) {
 	if mgrCenter.PeerCount() != 1 {
 		t.Fatalf("center has %d peers after MaxPeers enforcement, want 1", mgrCenter.PeerCount())
 	}
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if !capture.Has(slog.LevelInfo, "rejecting inbound: at capacity") {
+		t.Error("expected INFO log: rejecting inbound: at capacity")
+	}
 }
 
 // TestTenNodeMultiIP verifies discovery across 10 nodes each listening on a
@@ -462,6 +500,9 @@ func TestMaxPeersEnforcement(t *testing.T) {
 // propagate all addresses so every node discovers and dials the others,
 // converging into a full 10-node mesh.
 func TestTenNodeMultiIP(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	const N = 10
 
 	type testNode struct {
@@ -623,6 +664,16 @@ func TestTenNodeMultiIP(t *testing.T) {
 	msg = waitForMsg(nodes[0].session.Send, 5*time.Second, nicks[N-1], "reply from the edge")
 	if msg == "" {
 		t.Fatal("node-0 (127.0.0.1) did not receive message from node-9 (127.0.0.10)")
+	}
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if !capture.Has(slog.LevelDebug, "received peer exchange") {
+		t.Error("expected DEBUG log: received peer exchange")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
 	}
 }
 

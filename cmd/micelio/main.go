@@ -3,7 +3,7 @@ package main
 import (
 	"context"
 	"flag"
-	"log"
+	"log/slog"
 	"os"
 	"os/signal"
 	"path/filepath"
@@ -11,6 +11,7 @@ import (
 
 	"micelio/internal/config"
 	"micelio/internal/identity"
+	"micelio/internal/logging"
 	"micelio/internal/partyline"
 	"micelio/internal/ssh"
 	boltstore "micelio/internal/store/bolt"
@@ -22,12 +23,14 @@ func main() {
 	dataDir := flag.String("data-dir", "", "data directory (overrides config)")
 	sshListen := flag.String("ssh-listen", "", "SSH listen address (overrides config)")
 	nodeName := flag.String("name", "", "node name (overrides config)")
+	logLevel := flag.String("log-level", "", "log level: debug, info, warn, error (overrides config)")
 	flag.Parse()
 
 	// Load config (TOML file with defaults)
 	cfg, err := config.Load(*configPath)
 	if err != nil {
-		log.Fatalf("config: %v", err)
+		slog.Error("fatal: config", "err", err)
+		os.Exit(1)
 	}
 
 	// CLI flags override config file values
@@ -41,25 +44,37 @@ func main() {
 		cfg.Node.Name = *nodeName
 	}
 
+	// Resolve log level: CLI flag > config > env > default (info)
+	level := cfg.Logging.Level
+	if *logLevel != "" {
+		level = *logLevel
+	}
+	if level == "" {
+		level = os.Getenv("MICELIO_LOG_LEVEL")
+	}
+	logging.Init(level, cfg.Logging.Format)
+
 	cfg.Node.DataDir = config.ExpandHome(cfg.Node.DataDir)
 
 	if err := os.MkdirAll(cfg.Node.DataDir, 0700); err != nil {
-		log.Fatalf("creating data dir: %v", err)
+		slog.Error("fatal: creating data dir", "err", err)
+		os.Exit(1)
 	}
 
 	// Load or generate ED25519 identity
 	id, err := identity.Load(cfg.Node.DataDir)
 	if err != nil {
-		log.Fatalf("identity: %v", err)
+		slog.Error("fatal: identity", "err", err)
+		os.Exit(1)
 	}
-	log.Printf("Node ID:   %s", id.NodeID)
-	log.Printf("Node name: %s", cfg.Node.Name)
+	slog.Info("node started", "node_id", id.NodeID, "name", cfg.Node.Name)
 
 	// Open persistent store
 	dbPath := filepath.Join(cfg.Node.DataDir, "data.db")
 	store, err := boltstore.Open(dbPath)
 	if err != nil {
-		log.Fatalf("store: %v", err)
+		slog.Error("fatal: store", "err", err)
+		os.Exit(1)
 	}
 	defer store.Close()
 
@@ -76,7 +91,8 @@ func main() {
 		var err2 error
 		mgr, err2 = transport.NewManager(cfg, id, hub, store)
 		if err2 != nil {
-			log.Fatalf("transport: %v", err2)
+			slog.Error("fatal: transport", "err", err2)
+			os.Exit(1)
 		}
 	}
 
@@ -85,14 +101,14 @@ func main() {
 	if mgr != nil {
 		go func() {
 			if err := mgr.Start(ctx); err != nil {
-				log.Printf("transport: %v", err)
+				slog.Error("transport failed", "err", err)
 			}
 		}()
 		if cfg.Network.Listen != "" {
-			log.Printf("Transport listening on %s", cfg.Network.Listen)
+			slog.Info("transport listening", "addr", cfg.Network.Listen)
 		}
 		if len(cfg.Network.Bootstrap) > 0 {
-			log.Printf("Bootstrapping to %d peers", len(cfg.Network.Bootstrap))
+			slog.Info("bootstrapping", "peers", len(cfg.Network.Bootstrap))
 		}
 	}
 
@@ -100,23 +116,25 @@ func main() {
 	authKeysPath := filepath.Join(cfg.Node.DataDir, "authorized_keys")
 	sshServer, err := ssh.NewServer(cfg.SSH.Listen, id, hub, authKeysPath)
 	if err != nil {
-		log.Fatalf("ssh: %v", err)
+		slog.Error("fatal: ssh", "err", err)
+		os.Exit(1)
 	}
 
 	go func() {
 		if err := sshServer.Start(ctx); err != nil {
-			log.Fatalf("ssh: %v", err)
+			slog.Error("fatal: ssh", "err", err)
+			os.Exit(1)
 		}
 	}()
 
-	log.Printf("SSH partyline listening on %s", cfg.SSH.Listen)
+	slog.Info("ssh listening", "addr", cfg.SSH.Listen)
 
 	// Graceful shutdown on SIGINT/SIGTERM
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGINT, syscall.SIGTERM)
 	<-sigCh
 
-	log.Println("Shutting down...")
+	slog.Info("shutting down")
 	cancel()
 	if mgr != nil {
 		mgr.Stop()

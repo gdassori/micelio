@@ -3,6 +3,7 @@ package transport_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"strings"
 	"sync"
 	"testing"
@@ -10,6 +11,7 @@ import (
 
 	"micelio/internal/config"
 	"micelio/internal/identity"
+	"micelio/internal/logging"
 	"micelio/internal/partyline"
 	"micelio/internal/transport"
 )
@@ -54,6 +56,9 @@ func waitForMsg(ch <-chan string, timeout time.Duration, must ...string) string 
 }
 
 func TestTwoNodeChat(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	dirA := t.TempDir()
 	dirB := t.TempDir()
 
@@ -153,6 +158,14 @@ func TestTwoNodeChat(t *testing.T) {
 	hubB.Leave(sessionB)
 	mgrA.Stop()
 	mgrB.Stop()
+	time.Sleep(100 * time.Millisecond)
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }
 
 // TestTenNodeStar creates a 10-node star topology where nodes 1-9 bootstrap
@@ -161,6 +174,9 @@ func TestTwoNodeChat(t *testing.T) {
 // 2. Spoke → center: a message from node 7 reaches node 0.
 // 3. Spoke → spoke via center: gossip relay delivers to other spokes.
 func TestTenNodeStar(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	const N = 10
 
 	type testNode struct {
@@ -343,6 +359,13 @@ func TestTenNodeStar(t *testing.T) {
 			t.Fatal("no spoke received gossip-relayed message from spoke 3")
 		}
 	})
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }
 
 // TestOutboundBridge tests two isolated 3-node star networks (A and B) joined
@@ -360,6 +383,9 @@ func TestTenNodeStar(t *testing.T) {
 // 4. Center b0 sends → all nodes receive via gossip through bridge.
 // 5. Cross-network gossip: a1's message reaches b1 via center → bridge → b0.
 func TestOutboundBridge(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	const perNet = 3 // nodes per network (index 0 = center)
 
 	type testNode struct {
@@ -610,4 +636,11 @@ func TestOutboundBridge(t *testing.T) {
 			t.Error("b0 did not receive a1's message via gossip relay through bridge")
 		}
 	})
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }

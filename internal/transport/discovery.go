@@ -7,7 +7,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"log"
 	"math"
 	"math/rand/v2"
 	"net"
@@ -17,8 +16,11 @@ import (
 	"google.golang.org/protobuf/proto"
 
 	"micelio/internal/gossip"
+	"micelio/internal/logging"
 	pb "micelio/pkg/proto"
 )
+
+var dlog = logging.For("discovery")
 
 var peersBucket = []byte("peers")
 
@@ -55,7 +57,7 @@ func (m *Manager) loadKnownPeers() {
 	}
 	snap, err := m.store.Snapshot(peersBucket)
 	if err != nil {
-		log.Printf("discovery: load known peers: %v", err)
+		dlog.Warn("loading known peers", "err", err)
 		return
 	}
 	// Unmarshal and validate outside the lock
@@ -63,31 +65,31 @@ func (m *Manager) loadKnownPeers() {
 	for _, v := range snap {
 		var rec PeerRecord
 		if err := json.Unmarshal(v, &rec); err != nil {
-			log.Printf("discovery: unmarshal peer record: %v", err)
+			dlog.Warn("unmarshal peer record", "err", err)
 			continue
 		}
 		if rec.NodeID == "" {
-			log.Printf("discovery: skipping peer record with empty NodeID")
+			dlog.Warn("skipping peer: empty NodeID")
 			continue
 		}
 		if rec.Addr != "" && isInvalidPeerAddr(rec.Addr) {
-			log.Printf("discovery: skipping peer %s with invalid addr %q", formatNodeIDShort(rec.NodeID), rec.Addr)
+			dlog.Warn("skipping peer: invalid addr", "peer", formatNodeIDShort(rec.NodeID), "addr", rec.Addr)
 			continue
 		}
 		// Validate public key if present: must be valid hex, correct length, and match node_id
 		if rec.PublicKey != "" {
 			pubBytes, err := hex.DecodeString(rec.PublicKey)
 			if err != nil {
-				log.Printf("discovery: skipping peer %s with invalid public key encoding", formatNodeIDShort(rec.NodeID))
+				dlog.Warn("skipping peer: invalid pubkey encoding", "peer", formatNodeIDShort(rec.NodeID))
 				continue
 			}
 			if len(pubBytes) != ed25519.PublicKeySize {
-				log.Printf("discovery: skipping peer %s with invalid public key length", formatNodeIDShort(rec.NodeID))
+				dlog.Warn("skipping peer: invalid pubkey length", "peer", formatNodeIDShort(rec.NodeID))
 				continue
 			}
 			hash := sha256.Sum256(pubBytes)
 			if hex.EncodeToString(hash[:]) != rec.NodeID {
-				log.Printf("discovery: skipping peer %s with mismatched pubkey", formatNodeIDShort(rec.NodeID))
+				dlog.Warn("skipping peer: mismatched pubkey", "peer", formatNodeIDShort(rec.NodeID))
 				continue
 			}
 		}
@@ -99,7 +101,7 @@ func (m *Manager) loadKnownPeers() {
 		m.knownPeers[rec.NodeID] = rec
 	}
 	if len(m.knownPeers) > 0 {
-		log.Printf("discovery: loaded %d known peers from store", len(m.knownPeers))
+		dlog.Info("loaded known peers", "count", len(m.knownPeers))
 	}
 }
 
@@ -110,11 +112,11 @@ func (m *Manager) saveKnownPeer(rec *PeerRecord) {
 	}
 	data, err := json.Marshal(rec)
 	if err != nil {
-		log.Printf("discovery: marshal peer record: %v", err)
+		dlog.Error("marshal peer record", "err", err)
 		return
 	}
 	if err := m.store.Set(peersBucket, []byte(rec.NodeID), data); err != nil {
-		log.Printf("discovery: save peer %s: %v", rec.NodeID, err)
+		dlog.Error("save peer", "peer", rec.NodeID, "err", err)
 	}
 }
 
@@ -202,7 +204,7 @@ func (m *Manager) sendPeerExchangeTo(p *Peer) {
 	px := &pb.PeerExchange{Peers: infos}
 	payload, err := proto.Marshal(px)
 	if err != nil {
-		log.Printf("discovery: marshal peer_exchange: %v", err)
+		dlog.Error("marshal peer_exchange", "err", err)
 		return
 	}
 
@@ -217,14 +219,14 @@ func (m *Manager) sendPeerExchangeTo(p *Peer) {
 
 	envBytes, err := proto.Marshal(env)
 	if err != nil {
-		log.Printf("discovery: marshal envelope: %v", err)
+		dlog.Error("marshal envelope", "err", err)
 		return
 	}
 
 	select {
 	case p.sendCh <- envBytes:
 	default:
-		log.Printf("discovery: send buffer full for peer %s, dropping exchange", p.NodeID)
+		dlog.Warn("send buffer full, dropping exchange", "peer", p.NodeID)
 	}
 }
 
@@ -337,7 +339,7 @@ func (m *Manager) mergeDiscoveredPeers(infos []*pb.PeerInfo, fromNodeID string) 
 		}
 		hash := sha256.Sum256(info.Ed25519Pubkey)
 		if info.NodeId != hex.EncodeToString(hash[:]) {
-			log.Printf("discovery: ignoring peer with mismatched node_id from %s", formatNodeIDShort(fromNodeID))
+			dlog.Warn("ignoring peer: mismatched node_id", "from", formatNodeIDShort(fromNodeID))
 			continue
 		}
 		// Add to gossip keyring as gossip-learned (won't downgrade direct trust).
@@ -493,7 +495,7 @@ func (m *Manager) dialDiscovered(ctx context.Context, rec *PeerRecord) {
 		if snapshot != nil {
 			m.saveKnownPeer(snapshot)
 		}
-		log.Printf("discovery: dial %s (%s): %v", formatNodeIDShort(rec.NodeID), rec.Addr, err)
+		dlog.Debug("dial discovered peer failed", "peer", formatNodeIDShort(rec.NodeID), "addr", rec.Addr, "err", err)
 	}
 }
 
@@ -511,7 +513,7 @@ func (m *Manager) peerExchangeHandler() func(string, []*pb.PeerInfo) {
 	return func(nodeID string, infos []*pb.PeerInfo) {
 		m.mergeDiscoveredPeers(infos, nodeID)
 		if count := len(infos); count > 0 {
-			log.Printf("discovery: received %d peer(s) from %s", count, formatNodeIDShort(nodeID))
+			dlog.Debug("received peer exchange", "count", count, "from", formatNodeIDShort(nodeID))
 		}
 	}
 }
