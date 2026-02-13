@@ -16,6 +16,7 @@ import (
 	"github.com/google/uuid"
 	"google.golang.org/protobuf/proto"
 
+	"micelio/internal/gossip"
 	pb "micelio/pkg/proto"
 )
 
@@ -118,9 +119,12 @@ func (m *Manager) saveKnownPeer(rec *PeerRecord) {
 }
 
 // onPeerConnected is called after a peer completes the hello exchange and is
-// added to the peers map. It updates discovery state and sends an initial
-// PeerExchange.
+// added to the peers map. It updates discovery state, adds the peer's key to
+// the gossip keyring (TrustDirectlyVerified), and sends an initial PeerExchange.
 func (m *Manager) onPeerConnected(p *Peer) {
+	// Add peer's key to the gossip keyring with the highest trust level.
+	m.gossip.KeyRing.Add(p.NodeID, p.edPubKey, gossip.TrustDirectlyVerified)
+
 	m.mu.Lock()
 	rec, ok := m.knownPeers[p.NodeID]
 	if !ok {
@@ -336,6 +340,9 @@ func (m *Manager) mergeDiscoveredPeers(infos []*pb.PeerInfo, fromNodeID string) 
 			log.Printf("discovery: ignoring peer with mismatched node_id from %s", formatNodeIDShort(fromNodeID))
 			continue
 		}
+		// Add to gossip keyring as gossip-learned (won't downgrade direct trust).
+		m.gossip.KeyRing.Add(info.NodeId, info.Ed25519Pubkey, gossip.TrustGossipLearned)
+
 		validated = append(validated, validEntry{
 			info:      info,
 			pubKeyHex: hex.EncodeToString(info.Ed25519Pubkey),

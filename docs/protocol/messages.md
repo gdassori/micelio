@@ -8,13 +8,14 @@ The `Envelope` is the universal wrapper for every message exchanged between peer
 
 ```protobuf
 message Envelope {
-    string message_id = 1;   // UUID v4, unique per message
-    string sender_id  = 2;   // node_id of originator
-    uint64 lamport_ts = 3;   // Lamport clock (reserved, unused in Phase 2)
-    uint32 hop_count  = 4;   // decremented at each hop
-    uint32 msg_type   = 5;   // payload type discriminator
-    bytes  payload    = 6;   // serialized inner message
-    bytes  signature  = 7;   // ED25519 signature
+    string message_id   = 1;   // UUID v4, unique per message
+    string sender_id    = 2;   // node_id of originator
+    uint64 lamport_ts   = 3;   // Lamport clock (reserved, unused in Phase 2)
+    uint32 hop_count    = 4;   // decremented at each hop
+    uint32 msg_type     = 5;   // payload type discriminator
+    bytes  payload      = 6;   // serialized inner message
+    bytes  signature    = 7;   // ED25519 signature
+    bytes  sender_pubkey = 8;  // raw 32-byte ED25519 public key of originator
 }
 ```
 
@@ -25,14 +26,15 @@ message Envelope {
 | `message_id` | string | UUID v4. Globally unique. Used for deduplication. |
 | `sender_id` | string | Node ID of the originating node (64 hex chars). |
 | `lamport_ts` | uint64 | Lamport timestamp at send time. Reserved for future use (Phase 5). |
-| `hop_count` | uint32 | TTL decremented at each relay hop. Reserved for future use (Phase 4). |
+| `hop_count` | uint32 | TTL decremented at each relay hop. Messages with `hop_count <= 1` are delivered locally but not forwarded. |
 | `msg_type` | uint32 | Discriminator for the `payload` contents. See [Message Types](#message-types). |
 | `payload` | bytes | Serialized inner protobuf message. |
 | `signature` | bytes | ED25519 signature over the signed data. |
+| `sender_pubkey` | bytes | Raw 32-byte ED25519 public key of the originating node. Allows receiving nodes to verify signatures and auto-learn keys without a prior PeerHello exchange (see [Auto-Learn](#auto-learn)). |
 
 ### Signature
 
-The signature covers all fields **except** `hop_count` (which changes at each relay hop) and `signature` itself:
+The signature covers all fields **except** `hop_count` (which changes at each relay hop), `signature` itself, and `sender_pubkey` (which is an auxiliary field for key distribution):
 
 ```
 signed_data = message_id ‖ sender_id ‖ lamport_ts (8 bytes, big-endian) ‖ msg_type (4 bytes, big-endian) ‖ payload
@@ -42,32 +44,56 @@ signed_data = message_id ‖ sender_id ‖ lamport_ts (8 bytes, big-endian) ‖ 
 signature = ED25519_Sign(private_key, signed_data)
 ```
 
-Verification uses the sender's ED25519 public key, which is learned during the [PeerHello exchange](connection.md#peerhello-exchange).
+Verification uses the sender's ED25519 public key, which can be learned in two ways:
+
+1. **PeerHello exchange** — during [connection setup](connection.md#peerhello-exchange), keys are registered with `TrustDirectlyVerified`.
+2. **Auto-learn from `sender_pubkey`** — when a gossip message arrives from an unknown sender, the gossip engine can learn the key from the envelope (see [Auto-Learn](#auto-learn)).
 
 !!! note
-    The `hop_count` field is deliberately excluded from the signature. In future phases (gossip relay), intermediate nodes will decrement `hop_count` without invalidating the original sender's signature.
+    The `hop_count` field is deliberately excluded from the signature so that intermediate nodes can decrement it during gossip relay without invalidating the original sender's signature.
+
+### Auto-Learn
+
+When a gossip message arrives with an unknown `sender_id`, the gossip engine attempts to learn the sender's key from the `sender_pubkey` field:
+
+1. `sender_pubkey` must be exactly 32 bytes (ED25519 public key size).
+2. `SHA-256(sender_pubkey)` must equal `sender_id` (hex-encoded).
+3. If both checks pass, the key is added to the keyring with `TrustGossipLearned` (weaker than `TrustDirectlyVerified`).
+4. The envelope signature is then verified against the learned key.
+
+This mechanism solves a bootstrap problem in gossip networks: when node A sends a message that is relayed by node B to node C, node C may not have A's public key. By including the public key in the envelope, C can verify the message immediately without waiting for a PeerExchange.
+
+!!! note
+    Auto-learned keys never overwrite directly verified keys. If a node's key is already known from a PeerHello exchange (`TrustDirectlyVerified`), the auto-learned key is ignored.
 
 ### Deduplication
 
-Each peer maintains a **seen set**: a map from `message_id` to the time it was first seen. When a message arrives:
+The gossip engine maintains a **seen cache**: a map from `message_id` to the time it was first seen. Message processing follows a two-phase approach:
 
-1. If `message_id` is in the seen set, the message is silently dropped.
-2. Otherwise, it is added to the seen set and processed.
+1. **Read-only check** (`Has`): if `message_id` is already in the seen cache, the message is silently dropped.
+2. **Key lookup and signature verification**: the sender's key is looked up (or auto-learned), and the signature is verified.
+3. **Atomic mark** (`Check`): only after verification succeeds is the `message_id` marked as seen.
+
+This ensures that messages dropped due to an unknown sender or invalid signature are **not** marked as seen. If the key is later learned (e.g., via a subsequent PeerExchange or auto-learn), a re-delivered copy of the same message can still be processed.
 
 Entries are evicted after a **5-minute TTL**. A cleanup goroutine runs every 60 seconds.
+
+Additionally, each peer maintains its own per-connection seen set for PeerExchange deduplication (non-gossip messages).
 
 ## Message Types
 
 The `msg_type` field determines how `payload` should be deserialized.
 
-| Value | Constant | Payload type | Direction |
-|-------|----------|-------------|-----------|
-| 1 | `MsgTypePeerHello` | `PeerHello` | Initiator → Responder |
-| 2 | `MsgTypePeerHelloAck` | `PeerHello` | Responder → Initiator |
-| 3 | `MsgTypeChat` | `ChatMessage` | Bidirectional |
-| 4 | `MsgTypePeerExchange` | `PeerExchange` | Bidirectional |
-| 5-99 | — | Reserved for core protocol | — |
-| 1000+ | — | Reserved for plugins (Phase 7) | — |
+| Value | Constant | Payload type | Direction | Gossip |
+|-------|----------|-------------|-----------|--------|
+| 1 | `MsgTypePeerHello` | `PeerHello` | Initiator → Responder | No |
+| 2 | `MsgTypePeerHelloAck` | `PeerHello` | Responder → Initiator | No |
+| 3 | `MsgTypeChat` | `ChatMessage` | Bidirectional | Yes |
+| 4 | `MsgTypePeerExchange` | `PeerExchange` | Bidirectional | No |
+| 5-99 | — | Reserved for core protocol | — | — |
+| 1000+ | — | Reserved for plugins (Phase 7) | — | — |
+
+Messages with `msg_type` 1, 2, and 4 are handled directly by the peer connection layer. All other message types (including `MsgTypeChat`) are routed through the gossip engine for deduplication, signature verification, rate limiting, and forwarding.
 
 ## PeerHello
 
@@ -100,7 +126,7 @@ The same protobuf type is used for both `PeerHello` (msg_type=1) and `PeerHelloA
 
 ## ChatMessage
 
-A chat message relayed through the partyline system.
+A chat message relayed through the partyline system and propagated via gossip.
 
 ```protobuf
 message ChatMessage {
@@ -144,7 +170,7 @@ message PeerExchange {
 
 ### PeerExchange Flow
 
-PeerExchange messages are sent in two scenarios:
+PeerExchange messages are sent directly between peers (hop_count=1, not gossip-relayed) in two scenarios:
 
 1. **On connect:** Immediately after a new peer completes the PeerHello exchange and is added to the peer map, the manager sends a PeerExchange containing all known reachable peers (excluding the recipient).
 2. **Periodically:** Every `exchange_interval` (default 30s), the manager sends a PeerExchange to all connected peers.
@@ -165,14 +191,12 @@ When a local user types a message:
 
 1. The SSH session sends it to the local **Hub**.
 2. The Hub broadcasts it to all local sessions and pushes a `RemoteMsg` to the transport layer.
-3. The transport **Manager** fans out the message to all connected peers via `SendChat`.
-4. Each peer wraps it in a signed `Envelope` and writes it to the wire.
+3. The transport **Manager** reads from the `remoteSend` channel, wraps the message in a signed `Envelope` (with `hop_count = max_hops`, `sender_pubkey` = local public key), and calls `gossip.Engine.Broadcast()`.
+4. The gossip engine marks the message as seen and sends it to **all** connected peers.
 
 When a remote chat message arrives:
 
-1. The peer's receive loop reads the frame, deserializes the `Envelope`, verifies the signature, and checks for duplicates.
-2. The `ChatMessage` payload is deserialized.
-3. `Hub.DeliverRemote(nick, text)` injects it as a **system message** into the local partyline.
-
-!!! note "No re-forwarding"
-    Remote messages are delivered as system messages, which are explicitly excluded from the transport fanout path. This prevents echo loops in Phase 2. Gossip relay (Phase 4) will introduce controlled re-forwarding with hop-count TTL.
+1. The peer's receive loop reads the frame, deserializes the `Envelope`, and routes it to the gossip engine via the `onGossipMessage` callback.
+2. The gossip engine performs [deduplication](#deduplication), key lookup (with [auto-learn](#auto-learn) if needed), signature verification, and rate limiting.
+3. If valid, the `ChatMessage` handler deserializes the payload and calls `Hub.DeliverRemote(nick, text)`, which injects it as a **system message** into the local partyline.
+4. If `hop_count > 1`, the engine decrements the hop count and forwards the message to a random subset of connected peers (fanout = 3), excluding the peer that delivered it.

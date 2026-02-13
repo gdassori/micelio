@@ -137,9 +137,11 @@ micelio/
 │   ├── partyline/         # Chat hub (channel-based, zero mutexes)
 │   ├── ssh/               # SSH server, terminal sessions
 │   ├── store/             # Store interface + bbolt implementation
+│   ├── gossip/            # Gossip engine (dedup, keyring, rate limiter, forwarding)
 │   └── transport/         # Noise encryption, wire framing, peer management, discovery
-├── pkg/proto/             # Generated protobuf Go code
+├── pkg/proto/             # Generated protobuf Go code + sign/verify helpers
 ├── proto/                 # Protobuf definitions
+├── plugin/builtin/        # Built-in plugins (ping, etc.)
 ├── docs/                  # Protocol documentation (MkDocs)
 ├── Makefile
 └── go.mod
@@ -150,10 +152,13 @@ micelio/
 - [x] **Phase 1** — Standalone node with SSH partyline
 - [x] **Phase 2** — Two nodes, direct connection ([#1](../../issues/1))
 - [x] **Phase 3** — Peer discovery and mesh formation ([#2](../../issues/2))
-- [ ] **Phase 4** — Gossip protocol ([#3](../../issues/3))
+- [x] **Phase 4** — Gossip protocol ([#3](../../issues/3))
 - [ ] **Phase 5** — Distributed state map with LWW + Lamport clock ([#4](../../issues/4))
 - [ ] **Phase 6** — Tagging and desired state ([#5](../../issues/5))
 - [ ] **Phase 7** — Plugin system ([#6](../../issues/6))
+- [ ] **Phase 8** — Access control: allowlist / denylist ([#10](../../issues/10))
+- [ ] **Phase 9** — Web-of-trust ([#11](../../issues/11))
+- [ ] **Phase 10** — Distributed hash table ([#12](../../issues/12))
 
 Each phase produces a working, testable binary. Each phase adds a layer without rewriting the ones below.
 

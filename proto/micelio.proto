@@ -6,13 +6,14 @@ option go_package = "micelio/pkg/proto";
 // Envelope wraps every message on the wire.
 // msg_type is numeric for extensibility: core 1-99, plugin 1000+.
 message Envelope {
-    string message_id = 1;       // UUID v4, unique per message
-    string sender_id  = 2;       // node_id of originator
-    uint64 lamport_ts = 3;       // Lamport clock (reserved, unused in Phase 2)
-    uint32 hop_count  = 4;       // decremented at each hop
-    uint32 msg_type   = 5;       // payload type
-    bytes  payload    = 6;       // serialized inner message
-    bytes  signature  = 7;       // ED25519 signature (excludes hop_count)
+    string message_id   = 1;     // UUID v4, unique per message
+    string sender_id    = 2;     // node_id of originator
+    uint64 lamport_ts   = 3;     // Lamport clock (reserved, unused in Phase 2)
+    uint32 hop_count    = 4;     // decremented at each hop
+    uint32 msg_type     = 5;     // payload type
+    bytes  payload      = 6;     // serialized inner message
+    bytes  signature    = 7;     // ED25519 signature (excludes hop_count and sender_pubkey)
+    bytes  sender_pubkey = 8;    // raw 32-byte ED25519 public key of originator
 }
 
 // PeerHello is sent by the initiator after the Noise handshake.

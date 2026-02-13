@@ -25,13 +25,14 @@ const (
 // msg_type is numeric for extensibility: core 1-99, plugin 1000+.
 type Envelope struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
-	MessageId     string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`  // UUID v4, unique per message
-	SenderId      string                 `protobuf:"bytes,2,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`     // node_id of originator
-	LamportTs     uint64                 `protobuf:"varint,3,opt,name=lamport_ts,json=lamportTs,proto3" json:"lamport_ts,omitempty"` // Lamport clock (reserved, unused in Phase 2)
-	HopCount      uint32                 `protobuf:"varint,4,opt,name=hop_count,json=hopCount,proto3" json:"hop_count,omitempty"`    // decremented at each hop
-	MsgType       uint32                 `protobuf:"varint,5,opt,name=msg_type,json=msgType,proto3" json:"msg_type,omitempty"`       // payload type
-	Payload       []byte                 `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`                       // serialized inner message
-	Signature     []byte                 `protobuf:"bytes,7,opt,name=signature,proto3" json:"signature,omitempty"`                   // ED25519 signature (excludes hop_count)
+	MessageId     string                 `protobuf:"bytes,1,opt,name=message_id,json=messageId,proto3" json:"message_id,omitempty"`          // UUID v4, unique per message
+	SenderId      string                 `protobuf:"bytes,2,opt,name=sender_id,json=senderId,proto3" json:"sender_id,omitempty"`             // node_id of originator
+	LamportTs     uint64                 `protobuf:"varint,3,opt,name=lamport_ts,json=lamportTs,proto3" json:"lamport_ts,omitempty"`         // Lamport clock (reserved, unused in Phase 2)
+	HopCount      uint32                 `protobuf:"varint,4,opt,name=hop_count,json=hopCount,proto3" json:"hop_count,omitempty"`            // decremented at each hop
+	MsgType       uint32                 `protobuf:"varint,5,opt,name=msg_type,json=msgType,proto3" json:"msg_type,omitempty"`               // payload type
+	Payload       []byte                 `protobuf:"bytes,6,opt,name=payload,proto3" json:"payload,omitempty"`                               // serialized inner message
+	Signature     []byte                 `protobuf:"bytes,7,opt,name=signature,proto3" json:"signature,omitempty"`                           // ED25519 signature (excludes hop_count and sender_pubkey)
+	SenderPubkey  []byte                 `protobuf:"bytes,8,opt,name=sender_pubkey,json=senderPubkey,proto3" json:"sender_pubkey,omitempty"` // raw 32-byte ED25519 public key of originator
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -111,6 +112,13 @@ func (x *Envelope) GetPayload() []byte {
 func (x *Envelope) GetSignature() []byte {
 	if x != nil {
 		return x.Signature
+	}
+	return nil
+}
+
+func (x *Envelope) GetSenderPubkey() []byte {
+	if x != nil {
+		return x.SenderPubkey
 	}
 	return nil
 }
@@ -474,7 +482,7 @@ var File_proto_micelio_proto protoreflect.FileDescriptor
 
 const file_proto_micelio_proto_rawDesc = "" +
 	"\n" +
-	"\x13proto/micelio.proto\x12\amicelio\"\xd5\x01\n" +
+	"\x13proto/micelio.proto\x12\amicelio\"\xfa\x01\n" +
 	"\bEnvelope\x12\x1d\n" +
 	"\n" +
 	"message_id\x18\x01 \x01(\tR\tmessageId\x12\x1b\n" +
@@ -484,7 +492,8 @@ const file_proto_micelio_proto_rawDesc = "" +
 	"\thop_count\x18\x04 \x01(\rR\bhopCount\x12\x19\n" +
 	"\bmsg_type\x18\x05 \x01(\rR\amsgType\x12\x18\n" +
 	"\apayload\x18\x06 \x01(\fR\apayload\x12\x1c\n" +
-	"\tsignature\x18\a \x01(\fR\tsignature\"\xb8\x01\n" +
+	"\tsignature\x18\a \x01(\fR\tsignature\x12#\n" +
+	"\rsender_pubkey\x18\b \x01(\fR\fsenderPubkey\"\xb8\x01\n" +
 	"\tPeerHello\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x18\n" +
 	"\aversion\x18\x02 \x01(\tR\aversion\x12\x12\n" +

@@ -145,8 +145,8 @@ func TestEnvelopeSignDataDeterministic(t *testing.T) {
 		Payload:   []byte("hello"),
 	}
 
-	d1 := envelopeSignData(env)
-	d2 := envelopeSignData(env)
+	d1 := pb.EnvelopeSignData(env)
+	d2 := pb.EnvelopeSignData(env)
 	if len(d1) != len(d2) {
 		t.Fatal("sign data not deterministic")
 	}
