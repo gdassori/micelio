@@ -26,13 +26,14 @@ From bottom to top:
 
 ## Current Status
 
-The protocol is implemented through Phase 3:
+The protocol is implemented through Phase 4:
 
 - **Phase 1** — Standalone node: identity generation, SSH partyline, bbolt storage.
 - **Phase 2** — Direct connections: Noise-encrypted TCP, protobuf wire protocol, PeerHello handshake, bidirectional chat relay, message signing, deduplication.
 - **Phase 3** — Peer discovery: PeerExchange messages, automatic mesh formation, persistent peer table (bbolt), exponential backoff, MaxPeers enforcement, advertise address support.
+- **Phase 4** — Gossip protocol: multi-hop message relay (fanout=3, max_hops=10), centralized deduplication via seen cache, auto-key-learning from `sender_pubkey`, per-sender rate limiting, trust-level keyring.
 
-Phases 4-7 (gossip relay, distributed state, tagging, plugins) are planned but not yet implemented. Messages currently propagate only to directly connected peers — there is no multi-hop relay.
+Phases 5-7 (distributed state, tagging, plugins) are planned but not yet implemented.
 
 ## Quick Reference
 
@@ -45,4 +46,4 @@ Phases 4-7 (gossip relay, distributed state, tagging, plugins) are planned but n
 | Frame magic | `0x4D49` ("MI") |
 | Max payload | 1 MB |
 | Signature | ED25519 over `message_id ‖ sender_id ‖ lamport_ts ‖ msg_type ‖ payload` |
-| Deduplication | Per-peer seen set, keyed by `message_id`, TTL 5 min |
+| Deduplication | Gossip engine seen cache (`message_id`, TTL 5 min) + per-peer seen set for PeerExchange |
