@@ -5,11 +5,16 @@ import (
 	"crypto/rand"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
+	"math"
+	"path/filepath"
 	"testing"
+	"time"
 
 	"micelio/internal/config"
 	"micelio/internal/identity"
 	"micelio/internal/partyline"
+	boltstore "micelio/internal/store/bolt"
 
 	pb "micelio/pkg/proto"
 )
@@ -271,5 +276,257 @@ func TestIsInvalidPeerAddr(t *testing.T) {
 		if got != tc.invalid {
 			t.Errorf("isInvalidPeerAddr(%q) = %v, want %v", tc.addr, got, tc.invalid)
 		}
+	}
+}
+
+// --- PeerRecord.backoff tests ---
+
+func TestBackoffZeroFails(t *testing.T) {
+	rec := &PeerRecord{FailCount: 0}
+	if d := rec.backoff(); d != 0 {
+		t.Fatalf("expected 0 backoff for 0 fails, got %v", d)
+	}
+}
+
+func TestBackoffExponential(t *testing.T) {
+	cases := []struct {
+		failCount int
+		wantSecs  float64
+	}{
+		{1, 1},   // 2^0 = 1
+		{2, 2},   // 2^1 = 2
+		{3, 4},   // 2^2 = 4
+		{4, 8},   // 2^3 = 8
+		{5, 16},  // 2^4 = 16
+		{6, 30},  // 2^5 = 32, capped at 30
+		{10, 30}, // capped at 30
+	}
+	for _, tc := range cases {
+		rec := &PeerRecord{FailCount: tc.failCount}
+		got := rec.backoff()
+		want := time.Duration(tc.wantSecs) * time.Second
+		if got != want {
+			t.Errorf("backoff(fails=%d) = %v, want %v", tc.failCount, got, want)
+		}
+	}
+}
+
+func TestBackoffNegativeFails(t *testing.T) {
+	rec := &PeerRecord{FailCount: -1}
+	if d := rec.backoff(); d != 0 {
+		t.Fatalf("expected 0 backoff for negative fails, got %v", d)
+	}
+}
+
+// --- safeLastSeen tests ---
+
+func TestSafeLastSeenNormal(t *testing.T) {
+	got := safeLastSeen(1000)
+	if got != 1000 {
+		t.Fatalf("expected 1000, got %d", got)
+	}
+}
+
+func TestSafeLastSeenOverflow(t *testing.T) {
+	got := safeLastSeen(math.MaxUint64)
+	if got != math.MaxInt64 {
+		t.Fatalf("expected MaxInt64, got %d", got)
+	}
+}
+
+func TestSafeLastSeenBoundary(t *testing.T) {
+	// Exactly MaxInt64 should pass through
+	got := safeLastSeen(uint64(math.MaxInt64))
+	if got != math.MaxInt64 {
+		t.Fatalf("expected MaxInt64, got %d", got)
+	}
+	// MaxInt64 + 1 should be clamped
+	got = safeLastSeen(uint64(math.MaxInt64) + 1)
+	if got != math.MaxInt64 {
+		t.Fatalf("expected MaxInt64 for overflow, got %d", got)
+	}
+}
+
+// --- makeTestManagerWithStore creates a Manager backed by a real bolt store ---
+
+func makeTestManagerWithStore(t *testing.T) *Manager {
+	t.Helper()
+	dir := t.TempDir()
+	id, err := identity.Load(dir)
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	hub := partyline.NewHub("test")
+	st, err := boltstore.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	t.Cleanup(func() { st.Close() })
+	cfg := &config.Config{
+		Node:    config.NodeConfig{Name: "test"},
+		Network: config.NetworkConfig{},
+	}
+	mgr, err := NewManager(cfg, id, hub, st)
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+	return mgr
+}
+
+// --- saveKnownPeer + loadKnownPeers round-trip ---
+
+func TestSaveAndLoadKnownPeers(t *testing.T) {
+	dir := t.TempDir()
+
+	// Create identity and store
+	id, err := identity.Load(dir)
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	hub := partyline.NewHub("test")
+	st, err := boltstore.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+
+	cfg := &config.Config{
+		Node:    config.NodeConfig{Name: "test"},
+		Network: config.NetworkConfig{},
+	}
+
+	// Create manager with store, save a peer
+	mgr, err := NewManager(cfg, id, hub, st)
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+
+	// Generate a valid peer key
+	pub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hash := sha256.Sum256(pub)
+	nodeID := hex.EncodeToString(hash[:])
+
+	rec := &PeerRecord{
+		NodeID:    nodeID,
+		Addr:      "10.0.0.1:4000",
+		Reachable: true,
+		PublicKey: hex.EncodeToString(pub),
+		LastSeen:  time.Now().Unix(),
+	}
+	mgr.saveKnownPeer(rec)
+
+	// Close the store, reopen, and create a new manager to test loadKnownPeers
+	st.Close()
+
+	st2, err := boltstore.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("reopen store: %v", err)
+	}
+	defer st2.Close()
+
+	mgr2, err := NewManager(cfg, id, hub, st2)
+	if err != nil {
+		t.Fatalf("manager2: %v", err)
+	}
+
+	mgr2.mu.Lock()
+	loaded, ok := mgr2.knownPeers[nodeID]
+	mgr2.mu.Unlock()
+
+	if !ok {
+		t.Fatal("expected peer to be loaded from store")
+	}
+	if loaded.Addr != "10.0.0.1:4000" {
+		t.Fatalf("expected addr 10.0.0.1:4000, got %s", loaded.Addr)
+	}
+	if loaded.PublicKey != hex.EncodeToString(pub) {
+		t.Fatal("public key mismatch after load")
+	}
+}
+
+func TestSaveKnownPeerNilStore(t *testing.T) {
+	mgr := makeTestManager(t) // nil store
+	rec := &PeerRecord{NodeID: "test", Addr: "1.2.3.4:5000"}
+	// Should not panic
+	mgr.saveKnownPeer(rec)
+}
+
+func TestLoadKnownPeersSkipsInvalidRecords(t *testing.T) {
+	dir := t.TempDir()
+	id, err := identity.Load(dir)
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+	hub := partyline.NewHub("test")
+	st, err := boltstore.Open(filepath.Join(dir, "test.db"))
+	if err != nil {
+		t.Fatalf("open store: %v", err)
+	}
+	defer st.Close()
+
+	// Manually insert invalid records into the store
+
+	// 1. Invalid JSON
+	st.Set(peersBucket, []byte("bad-json"), []byte("not-json{"))
+
+	// 2. Empty NodeID
+	emptyID, _ := json.Marshal(PeerRecord{Addr: "1.2.3.4:5000"})
+	st.Set(peersBucket, []byte("empty-id"), emptyID)
+
+	// 3. Invalid addr (wildcard)
+	wildcard, _ := json.Marshal(PeerRecord{NodeID: "abc123", Addr: "0.0.0.0:4000"})
+	st.Set(peersBucket, []byte("wildcard"), wildcard)
+
+	// 4. Invalid pubkey (bad hex)
+	badHex, _ := json.Marshal(PeerRecord{NodeID: "abc123", Addr: "10.0.0.1:4000", PublicKey: "not-hex!!"})
+	st.Set(peersBucket, []byte("bad-hex"), badHex)
+
+	// 5. Invalid pubkey (wrong length)
+	shortKey, _ := json.Marshal(PeerRecord{NodeID: "abc123", Addr: "10.0.0.1:4000", PublicKey: hex.EncodeToString([]byte("short"))})
+	st.Set(peersBucket, []byte("short-key"), shortKey)
+
+	// 6. Pubkey hash doesn't match NodeID
+	pub, _, _ := ed25519.GenerateKey(rand.Reader)
+	mismatch, _ := json.Marshal(PeerRecord{
+		NodeID:    "0000000000000000000000000000000000000000000000000000000000000000",
+		Addr:      "10.0.0.1:4000",
+		PublicKey: hex.EncodeToString(pub),
+	})
+	st.Set(peersBucket, []byte("mismatch"), mismatch)
+
+	// 7. Valid record (no pubkey, just addr — should be accepted)
+	validNoPub, _ := json.Marshal(PeerRecord{NodeID: "valid-no-pub", Addr: "10.0.0.2:4000"})
+	st.Set(peersBucket, []byte("valid-no-pub"), validNoPub)
+
+	cfg := &config.Config{
+		Node:    config.NodeConfig{Name: "test"},
+		Network: config.NetworkConfig{},
+	}
+	mgr, err := NewManager(cfg, id, hub, st)
+	if err != nil {
+		t.Fatalf("manager: %v", err)
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+
+	// Only the valid record without pubkey should have been loaded
+	if len(mgr.knownPeers) != 1 {
+		t.Fatalf("expected 1 valid peer loaded, got %d", len(mgr.knownPeers))
+	}
+	if _, ok := mgr.knownPeers["valid-no-pub"]; !ok {
+		t.Fatal("expected valid-no-pub to be loaded")
+	}
+}
+
+func TestLoadKnownPeersNilStore(t *testing.T) {
+	mgr := makeTestManager(t) // nil store
+	// loadKnownPeers is called during NewManager; just verify it didn't crash
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.knownPeers) != 0 {
+		t.Fatalf("expected 0 peers with nil store, got %d", len(mgr.knownPeers))
 	}
 }

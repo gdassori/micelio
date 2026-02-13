@@ -22,11 +22,14 @@ jobs:
       - name: Test with coverage
         run: go test -v -race -timeout 120s -coverprofile=coverage.out -covermode=atomic ./...
 
+      - name: Filter generated code from coverage
+        run: grep -v '.pb.go' coverage.out > coverage-filtered.out
+
       - name: Upload coverage to Coveralls
         uses: coverallsapp/github-action@v2
         with:
           github-token: ${{ secrets.GITHUB_TOKEN }}
-          file: coverage.out
+          file: coverage-filtered.out
           format: golang
 
       - name: Cross-compile (linux/arm64)

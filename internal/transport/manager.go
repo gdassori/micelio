@@ -9,12 +9,16 @@ import (
 	"time"
 
 	"github.com/flynn/noise"
+	"github.com/google/uuid"
+	"google.golang.org/protobuf/proto"
 
-	mcrypto "micelio/internal/crypto"
 	"micelio/internal/config"
+	mcrypto "micelio/internal/crypto"
+	"micelio/internal/gossip"
 	"micelio/internal/identity"
 	"micelio/internal/partyline"
 	"micelio/internal/store"
+	pb "micelio/pkg/proto"
 )
 
 // Manager manages all peer connections for a node.
@@ -24,6 +28,7 @@ type Manager struct {
 	hub      *partyline.Hub
 	noiseKey noise.DHKey
 	store    store.Store // nil in tests
+	gossip   *gossip.Engine
 
 	mu             sync.Mutex
 	peers          map[string]*Peer       // nodeID → Peer
@@ -69,6 +74,22 @@ func NewManager(cfg *config.Config, id *identity.Identity, hub *partyline.Hub, s
 		done:           make(chan struct{}),
 	}
 
+	// Create gossip engine — the manager provides peer handles via callback.
+	mgr.gossip = gossip.NewEngine(id.NodeID, mgr.peerHandles)
+
+	// Register chat message handler: deliver to local partyline hub.
+	mgr.gossip.RegisterHandler(MsgTypeChat, func(senderID string, payload []byte) {
+		var chat pb.ChatMessage
+		if err := proto.Unmarshal(payload, &chat); err != nil {
+			log.Printf("gossip: unmarshal chat: %v", err)
+			return
+		}
+		hub.DeliverRemote(chat.Nick, chat.Text)
+	})
+
+	// Add self to keyring so our own messages (reflected via gossip) can be verified.
+	mgr.gossip.KeyRing.Add(id.NodeID, id.PublicKey, gossip.TrustDirectlyVerified)
+
 	mgr.loadKnownPeers()
 
 	return mgr, nil
@@ -76,6 +97,8 @@ func NewManager(cfg *config.Config, id *identity.Identity, hub *partyline.Hub, s
 
 // Start begins listening for inbound connections and dialing bootstrap peers.
 func (m *Manager) Start(ctx context.Context) error {
+	m.gossip.Start()
+
 	if m.cfg.Network.Listen != "" {
 		ln, err := net.Listen("tcp", m.cfg.Network.Listen)
 		if err != nil {
@@ -104,6 +127,7 @@ func (m *Manager) Start(ctx context.Context) error {
 func (m *Manager) Stop() {
 	m.closeOnce.Do(func() {
 		close(m.done)
+		m.gossip.Stop()
 		m.mu.Lock()
 		if m.listener != nil {
 			m.listener.Close()
@@ -254,15 +278,35 @@ func (m *Manager) dial(addr string) error {
 	return nil
 }
 
+// fanoutLoop reads local user messages from the partyline and broadcasts them
+// via the gossip engine. Each message becomes a single signed Envelope sent to
+// all connected peers (first hop); intermediate nodes forward to a random subset.
 func (m *Manager) fanoutLoop(ctx context.Context) {
 	for {
 		select {
 		case msg := <-m.remoteSend:
-			m.mu.Lock()
-			for _, p := range m.peers {
-				p.SendChat(msg.Nick, msg.Text)
+			chat := &pb.ChatMessage{
+				Nick:      msg.Nick,
+				Text:      msg.Text,
+				Timestamp: uint64(time.Now().Unix()),
 			}
-			m.mu.Unlock()
+			payload, err := proto.Marshal(chat)
+			if err != nil {
+				log.Printf("gossip: marshal chat: %v", err)
+				continue
+			}
+
+			env := &pb.Envelope{
+				MessageId:    uuid.New().String(),
+				SenderId:     m.id.NodeID,
+				MsgType:      MsgTypeChat,
+				HopCount:     m.gossip.MaxHops(),
+				Payload:      payload,
+				SenderPubkey: m.id.PublicKey,
+			}
+			pb.SignEnvelope(env, m.id.PrivateKey)
+			m.gossip.Broadcast(env)
+
 		case <-ctx.Done():
 			return
 		case <-m.done:
@@ -282,6 +326,7 @@ func (m *Manager) addPeer(p *Peer) string {
 		return "max peers reached"
 	}
 	p.onPeerExchange = m.peerExchangeHandler()
+	p.onGossipMessage = m.gossipMessageHandler()
 	m.peers[p.NodeID] = p
 	return ""
 }
@@ -290,6 +335,30 @@ func (m *Manager) removePeer(nodeID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	delete(m.peers, nodeID)
+}
+
+// peerHandles returns gossip PeerHandles for all currently connected peers.
+// Called by the gossip engine when it needs to forward messages.
+func (m *Manager) peerHandles() []gossip.PeerHandle {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	handles := make([]gossip.PeerHandle, 0, len(m.peers))
+	for _, p := range m.peers {
+		peer := p // capture for closure
+		handles = append(handles, gossip.PeerHandle{
+			NodeID: peer.NodeID,
+			Send:   peer.SendRaw,
+		})
+	}
+	return handles
+}
+
+// gossipMessageHandler returns the callback set on each peer to route
+// gossip-eligible messages to the engine.
+func (m *Manager) gossipMessageHandler() func(string, *pb.Envelope) {
+	return func(fromPeerID string, env *pb.Envelope) {
+		m.gossip.HandleIncoming(fromPeerID, env)
+	}
 }
 
 func (m *Manager) helloConfig() HelloConfig {

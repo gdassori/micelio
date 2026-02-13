@@ -159,7 +159,7 @@ func TestTwoNodeChat(t *testing.T) {
 // to node 0. It verifies:
 // 1. Center → spokes: a message from node 0 reaches all 9 other nodes.
 // 2. Spoke → center: a message from node 7 reaches node 0.
-// 3. Spoke → spoke via center: does NOT propagate (no gossip in Phase 2).
+// 3. Spoke → spoke via center: gossip relay delivers to other spokes.
 func TestTenNodeStar(t *testing.T) {
 	const N = 10
 
@@ -316,8 +316,8 @@ func TestTenNodeStar(t *testing.T) {
 		drainFor(nodes[i].session.Send, 100*time.Millisecond)
 	}
 
-	// --- Test 3: spoke-to-spoke does NOT propagate (no gossip yet) ---
-	t.Run("spoke_no_gossip", func(t *testing.T) {
+	// --- Test 3: spoke-to-spoke via gossip relay through center ---
+	t.Run("spoke_gossip_relay", func(t *testing.T) {
 		nodes[3].hub.Broadcast(nodes[3].session, "whisper from spoke-3")
 
 		// Node 0 (center) should get it since node 3 is connected to it
@@ -326,10 +326,21 @@ func TestTenNodeStar(t *testing.T) {
 			t.Fatal("center did not receive message from spoke 3")
 		}
 
-		// Node 5 should NOT get it — no gossip relay in Phase 2
-		msg = waitForMsg(nodes[5].session.Send, 500*time.Millisecond)
-		if msg != "" {
-			t.Fatalf("node 5 unexpectedly received: %s", msg)
+		// At least one other spoke should receive it via gossip relay through center.
+		// With fanout=3 and 8 candidate spokes, any specific spoke has ~37.5% chance;
+		// checking all ensures this test is not flaky.
+		received := false
+		for i := 1; i < N; i++ {
+			if i == 3 {
+				continue // sender
+			}
+			msg := waitForMsg(nodes[i].session.Send, 500*time.Millisecond, "user-3", "whisper from spoke-3")
+			if msg != "" {
+				received = true
+			}
+		}
+		if !received {
+			t.Fatal("no spoke received gossip-relayed message from spoke 3")
 		}
 	})
 }
@@ -345,9 +356,9 @@ func TestTenNodeStar(t *testing.T) {
 // Verifies:
 // 1. Bridge reaches both centers despite having no listen port.
 // 2. Bridge sends a message → both centers receive it.
-// 3. Center a0 sends → bridge + a1 + a2 receive, Net B does not.
-// 4. Center b0 sends → bridge + b1 + b2 receive, Net A does not.
-// 5. No cross-network gossip: a1's message does NOT reach b1 (Phase 2).
+// 3. Center a0 sends → all nodes receive via gossip through bridge.
+// 4. Center b0 sends → all nodes receive via gossip through bridge.
+// 5. Cross-network gossip: a1's message reaches b1 via center → bridge → b0.
 func TestOutboundBridge(t *testing.T) {
 	const perNet = 3 // nodes per network (index 0 = center)
 
@@ -530,11 +541,11 @@ func TestOutboundBridge(t *testing.T) {
 
 	drainAll()
 
-	// --- Test 2: a0 sends → bridge + a1 + a2 receive, Net B silent ---
+	// --- Test 2: a0 sends → all nodes receive via gossip through bridge ---
 	t.Run("netA_center_broadcast", func(t *testing.T) {
 		netA[0].hub.Broadcast(netA[0].session, "msg from a0")
 
-		// a1, a2, bridge should receive
+		// a1, a2, bridge should receive directly
 		for _, pair := range []struct {
 			name string
 			ch   <-chan string
@@ -548,17 +559,15 @@ func TestOutboundBridge(t *testing.T) {
 			}
 		}
 
-		// b0, b1, b2 should NOT receive (no gossip)
-		for i := 0; i < perNet; i++ {
-			if msg := waitForMsg(netB[i].session.Send, 500*time.Millisecond); msg != "" {
-				t.Errorf("b%d unexpectedly received: %s", i, msg)
-			}
+		// b0 should receive via gossip through the bridge
+		if waitForMsg(netB[0].session.Send, 5*time.Second, "userA0", "msg from a0") == "" {
+			t.Error("b0 did not receive a0's message via gossip through bridge")
 		}
 	})
 
 	drainAll()
 
-	// --- Test 3: b0 sends → bridge + b1 + b2 receive, Net A silent ---
+	// --- Test 3: b0 sends → all nodes receive via gossip through bridge ---
 	t.Run("netB_center_broadcast", func(t *testing.T) {
 		netB[0].hub.Broadcast(netB[0].session, "msg from b0")
 
@@ -575,31 +584,30 @@ func TestOutboundBridge(t *testing.T) {
 			}
 		}
 
-		for i := 0; i < perNet; i++ {
-			if msg := waitForMsg(netA[i].session.Send, 500*time.Millisecond); msg != "" {
-				t.Errorf("a%d unexpectedly received: %s", i, msg)
-			}
+		// a0 should receive via gossip through the bridge
+		if waitForMsg(netA[0].session.Send, 5*time.Second, "userB0", "msg from b0") == "" {
+			t.Error("a0 did not receive b0's message via gossip through bridge")
 		}
 	})
 
 	drainAll()
 
-	// --- Test 4: a1 sends → a0 gets it, bridge does NOT (not directly connected) ---
-	t.Run("spoke_isolation", func(t *testing.T) {
+	// --- Test 4: a1 sends → gossip relay propagates through a0 → bridge → Net B ---
+	t.Run("spoke_gossip_relay", func(t *testing.T) {
 		netA[1].hub.Broadcast(netA[1].session, "spoke a1 whisper")
 
 		if waitForMsg(netA[0].session.Send, 3*time.Second, "userA1", "spoke a1 whisper") == "" {
 			t.Error("a0 did not receive a1's message")
 		}
 
-		// Bridge is NOT directly connected to a1, so no delivery
-		if msg := waitForMsg(bridge.session.Send, 500*time.Millisecond); msg != "" {
-			t.Errorf("bridge unexpectedly received: %s", msg)
+		// Bridge receives via gossip relay through a0
+		if waitForMsg(bridge.session.Send, 5*time.Second, "userA1", "spoke a1 whisper") == "" {
+			t.Error("bridge did not receive a1's message via gossip relay")
 		}
 
-		// b1 definitely should not get it
-		if msg := waitForMsg(netB[1].session.Send, 500*time.Millisecond); msg != "" {
-			t.Errorf("b1 unexpectedly received: %s", msg)
+		// b0 receives via gossip relay through bridge
+		if waitForMsg(netB[0].session.Send, 5*time.Second, "userA1", "spoke a1 whisper") == "" {
+			t.Error("b0 did not receive a1's message via gossip relay through bridge")
 		}
 	})
 }

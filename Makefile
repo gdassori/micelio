@@ -3,7 +3,7 @@ CMD      := ./cmd/micelio
 VERSION  := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
 LDFLAGS  := -s -w -X main.version=$(VERSION)
 
-.PHONY: all build clean test proto linux-amd64 linux-arm64 linux-386 darwin-arm64
+.PHONY: all build clean test cover proto linux-amd64 linux-arm64 linux-386 darwin-arm64
 
 all: build
 
@@ -15,6 +15,12 @@ build:
 
 test:
 	go test ./...
+
+cover:
+	go test ./... -coverprofile=coverage.out
+	@grep -v '.pb.go' coverage.out > coverage-filtered.out
+	@go tool cover -func=coverage-filtered.out | tail -1
+	@rm -f coverage.out coverage-filtered.out
 
 clean:
 	rm -rf bin/

@@ -14,6 +14,10 @@ This page describes the internal architecture of a Micelio node: how the compone
 │  └────────────┘       └────────────┘       └──────┬──────┘  │
 │        │                                          │          │
 │        │                                   ┌──────┴──────┐   │
+│        │                                   │   Gossip    │   │
+│        │                                   │   Engine    │   │
+│        │                                   └──────┬──────┘   │
+│        │                                   ┌──────┴──────┐   │
 │        │                                   │   Peer(s)   │   │
 │        │                                   │ ┌─────────┐ │   │
 │        │                                   │ │ Noise   │ │   │
@@ -73,6 +77,22 @@ Provides human access to the partyline via SSH. Handles public key authenticatio
 
 **Source:** `internal/ssh/`
 
+### Gossip Engine
+
+The gossip protocol engine. Handles deduplication, signature verification via a trust-level keyring, per-sender rate limiting, hop count enforcement, local delivery to registered message handlers, and random-subset forwarding (fanout = 3, max_hops = 10).
+
+**Source:** `internal/gossip/`
+
+Sub-components:
+
+| Component | Purpose |
+|-----------|---------|
+| `SeenCache` | Deduplication via message ID tracking with 5-minute TTL |
+| `KeyRing` | Maps node IDs to ED25519 public keys with trust levels (`TrustDirectlyVerified` = 0, `TrustGossipLearned` = 1) |
+| `RateLimiter` | Per-sender token bucket (10 msg/s, burst = 2x rate) |
+
+The engine supports auto-learning sender keys from the `sender_pubkey` envelope field, allowing verification of messages from nodes not yet directly connected (see [Auto-Learn](protocol/messages.md#auto-learn)).
+
 ### Transport Manager
 
 Manages all peer connections. Responsibilities:
@@ -81,7 +101,8 @@ Manages all peer connections. Responsibilities:
 - **Dialing** bootstrap peers with exponential backoff.
 - **Noise handshake** and PeerHello exchange for each connection.
 - **Address advertising:** determines the address to advertise to peers. Prefers `network.advertise_addr` if set; otherwise uses the bound listen address, but suppresses wildcard addresses (`0.0.0.0`, `::`) since peers cannot reach them.
-- **Fanout loop:** reads from the Hub's `remoteSend` channel and distributes messages to all connected peers.
+- **Fanout loop:** reads from the Hub's `remoteSend` channel, wraps messages in signed envelopes (with `sender_pubkey`), and broadcasts via the gossip engine.
+- **Gossip integration:** creates the gossip engine, registers message handlers, registers peer public keys with `TrustDirectlyVerified` during PeerHello, and routes incoming gossip messages from peers to the engine.
 - **Peer lifecycle:** adds/removes peers, prevents duplicates, enforces `MaxPeers`.
 - **Peer discovery:** exchanges known peers via PeerExchange messages and auto-dials discovered peers (excluding bootstrap addresses, which are managed separately by `dialWithBackoff`).
 
@@ -107,8 +128,11 @@ Exponential backoff (`min(2^(failCount-1), 30)` seconds) prevents connection sto
 Represents a single connection to a remote node. Each Peer runs:
 
 - A **send loop** that reads from a buffered channel and writes framed messages.
-- A **receive loop** that reads framed messages, verifies signatures, deduplicates, and dispatches to handlers.
-- A **seen set cleanup** goroutine for deduplication TTL.
+- A **receive loop** that reads framed messages, deserializes envelopes, and dispatches by message type:
+    - `PeerHello`/`PeerHelloAck` (msg_type=1,2): silently dropped — handshake messages are point-to-point only and must never be gossip-relayed.
+    - `PeerExchange` (msg_type=4): per-peer deduplication, signature verification against the peer's known key, then routed to the manager's `onPeerExchange` callback.
+    - All other types: routed to the gossip engine via `onGossipMessage` for centralized dedup, key verification, rate limiting, and forwarding.
+- A **seen set cleanup** goroutine for per-peer PeerExchange deduplication.
 
 **Source:** `internal/transport/peer.go`
 
@@ -130,15 +154,17 @@ Hub.Run() goroutine:
         │
         ▼
 Manager.fanoutLoop() goroutine:
-  Reads RemoteMsg from channel
-  For each connected peer: peer.SendChat("alice", "hello")
+  1. Reads RemoteMsg from channel
+  2. Wraps in Envelope (UUID, sender_id, msg_type=3, hop_count=max_hops,
+     sender_pubkey=local_public_key)
+  3. Signs with ED25519 private key
+  4. Calls gossip.Engine.Broadcast(envelope)
         │
         ▼
-Peer.SendChat():
-  1. Marshal ChatMessage protobuf
-  2. Wrap in Envelope (UUID, sender_id, msg_type=3)
-  3. Sign envelope with ED25519 private key
-  4. Marshal envelope, push to sendCh
+Gossip Engine:
+  1. Marks message_id as seen
+  2. Serializes envelope
+  3. Sends to ALL connected peers (originator sends to all, not fanout subset)
         │
         ▼
 Peer.sendLoop() goroutine:
@@ -159,25 +185,24 @@ ReadFrame() → validate magic, version, length → payload bytes
         ▼
 Peer.recvLoop():
   1. Unmarshal Envelope protobuf
-  2. Check seen set (dedup by message_id)
+  2. Route by msg_type:
+     - PeerExchange (4) → per-peer dedup + verify + handlePeerExchange
+     - All others → onGossipMessage callback
+        │
+        ▼
+Gossip Engine (HandleIncoming):
+  0. Reject malformed envelopes (empty message_id or sender_id)
+  1. Read-only dedup check (Has) — drop if already seen
+  2. Key lookup in keyring; auto-learn from sender_pubkey if unknown
   3. Verify ED25519 signature
-  4. Verify sender_id matches peer
-  5. Dispatch by msg_type:
-     - MsgTypeChat (3) → handleChat
-     - MsgTypePeerExchange (4) → handlePeerExchange
-        │
-        ▼
-Peer.handleChat():
-  1. Unmarshal ChatMessage from payload
-  2. Call Hub.DeliverRemote(nick, text)
-        │
-        ▼
-Hub.Run() goroutine:
-  Broadcasts "[alice] hello" as system message to all local sessions
-        │
-        ▼
-SSH session sender goroutine:
-  Writes "[alice] hello\r\n" to terminal
+  4. Rate limit check (before marking seen, so rate-limited messages
+     can be retried when the sender's budget replenishes)
+  5. Atomic mark as seen (Check) — only after verification and rate
+     limiting succeed
+  6. Deliver to registered handler:
+     → ChatMessage handler → Hub.DeliverRemote(nick, text) → local sessions
+  7. Forward if hop_count > 1: decrement, re-serialize, send to random
+     subset of peers (fanout=3, excluding sender)
 ```
 
 ## Concurrency Model
@@ -192,23 +217,25 @@ SSH session sender goroutine:
 | `Manager.discoveryLoop()` | Node lifetime | — |
 | `Manager.dialWithBackoff()` | One per bootstrap addr | Backoff timer |
 | `Manager.dialDiscovered()` | Per-discovered-peer dial attempt | — |
+| `Gossip.SeenCache.CleanupLoop()` | Node lifetime | Seen cache eviction |
+| `Gossip.RateLimiter.CleanupLoop()` | Node lifetime | Rate limiter bucket eviction |
 | `Peer.sendLoop()` | Per-connection | — |
 | `Peer.recvLoop()` | Per-connection | — |
-| `Peer.cleanupSeenLoop()` | Per-connection | Seen set cleanup |
+| `Peer.cleanupSeenLoop()` | Per-connection | Per-peer seen set cleanup |
 | SSH session handler | Per-SSH-connection | Terminal state |
 
-The Manager's peer map is protected by a `sync.Mutex`. The Hub uses no mutexes — all state is owned by the `Run()` goroutine and accessed through channels. The Peer's seen set is protected by a `sync.Mutex`. The Noise connection's write path is protected by a `sync.Mutex` (although in practice only the send loop writes).
+The Manager's peer map is protected by a `sync.Mutex`. The Hub uses no mutexes — all state is owned by the `Run()` goroutine and accessed through channels. The Peer's per-connection seen set is protected by a `sync.Mutex`. The gossip engine's `SeenCache`, `KeyRing`, and `RateLimiter` each use their own `sync.Mutex`. The Noise connection's write path is protected by a `sync.Mutex` (although in practice only the send loop writes). Both `Engine.Stop()` and `Peer.Close()` use `sync.Once` to ensure idempotent shutdown (safe to call multiple times without double-close panics).
 
 ## Topology Examples
 
-### Star (current typical setup)
+### Star
 
 ```
   spoke1 ──→ center ←── spoke2
   spoke3 ──↗         ↖── spoke4
 ```
 
-All spokes bootstrap to the center. Messages from the center reach all spokes. Messages from a spoke reach only the center.
+All spokes bootstrap to the center. Messages from the center reach all spokes. Messages from a spoke reach the center, which relays them to other spokes via gossip (fanout = 3).
 
 ### Bridge (outbound-only node connecting two networks)
 
@@ -218,7 +245,7 @@ All spokes bootstrap to the center. Messages from the center reach all spokes. M
   a2 ↗                      ↖ b2
 ```
 
-The bridge has no listen port. It dials both centers. Messages from the bridge reach both centers. Messages do not cross networks (no gossip relay in Phase 2).
+The bridge has no listen port. It dials both centers. Messages from any node can cross networks via gossip relay through the bridge. For example, a message from a1 reaches a0, which forwards to bridge, which forwards to b0, which delivers to b1 and b2.
 
 ### Auto-Mesh via Discovery (Phase 3)
 
@@ -242,7 +269,7 @@ Discovery also works transitively across longer chains:
 
 PeerExchange propagates peer info along the chain. Within a few exchange+discovery cycles, all nodes discover each other and form direct connections, regardless of how far apart they were in the initial topology.
 
-### Future: Full Mesh with Gossip (Phase 4)
+### Full Mesh with Gossip (Phase 4)
 
 ```
   A ←──→ B
@@ -253,4 +280,4 @@ PeerExchange propagates peer info along the chain. Within a few exchange+discove
   C ←──→ D
 ```
 
-With gossip relay, a message from A will propagate to B, C, and D through hop-count-limited flooding. This is not yet implemented.
+With gossip relay, a message from A propagates to B, C, and D through hop-count-limited flooding. The originator sends to all connected peers; each relay node forwards to a random subset (fanout = 3) of its peers, excluding the sender. The `hop_count` field limits propagation depth (default max_hops = 10). Deduplication via the seen cache prevents infinite loops.

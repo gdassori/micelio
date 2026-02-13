@@ -4,7 +4,6 @@ import (
 	"bytes"
 	"crypto/ed25519"
 	"crypto/sha256"
-	"encoding/binary"
 	"encoding/hex"
 	"fmt"
 	"log"
@@ -48,6 +47,10 @@ type Peer struct {
 
 	// Callback for PeerExchange messages (set by Manager)
 	onPeerExchange func(nodeID string, infos []*pb.PeerInfo)
+
+	// Callback for gossip-eligible messages (set by Manager).
+	// All msg_types except PeerHello/HelloAck/PeerExchange are routed here.
+	onGossipMessage func(fromPeerID string, env *pb.Envelope)
 
 	sendCh chan []byte // framed envelope bytes ready to write
 	done   chan struct{}
@@ -120,38 +123,15 @@ func (p *Peer) Run() {
 	<-done
 }
 
-// SendChat queues a chat message for sending to this peer.
-func (p *Peer) SendChat(nick, text string) {
-	chat := &pb.ChatMessage{
-		Nick:      nick,
-		Text:      text,
-		Timestamp: uint64(time.Now().Unix()),
-	}
-	payload, err := proto.Marshal(chat)
-	if err != nil {
-		log.Printf("marshal chat: %v", err)
-		return
-	}
-
-	env := &pb.Envelope{
-		MessageId: uuid.New().String(),
-		SenderId:  p.localID.NodeID,
-		MsgType:   MsgTypeChat,
-		HopCount:  1,
-		Payload:   payload,
-	}
-	signEnvelope(env, p.localID.PrivateKey)
-
-	envBytes, err := proto.Marshal(env)
-	if err != nil {
-		log.Printf("marshal envelope: %v", err)
-		return
-	}
-
+// SendRaw queues pre-serialized envelope bytes for sending to this peer.
+// Returns false if the send buffer is full (message dropped).
+func (p *Peer) SendRaw(data []byte) bool {
 	select {
-	case p.sendCh <- envBytes:
+	case p.sendCh <- data:
+		return true
 	default:
 		log.Printf("peer %s: send buffer full, dropping message", p.NodeID)
+		return false
 	}
 }
 
@@ -194,27 +174,33 @@ func (p *Peer) recvLoop() error {
 			continue
 		}
 
-		if p.isDuplicate(env.MessageId) {
-			continue
-		}
-
-		if !verifySignature(&env, p.edPubKey) {
-			log.Printf("peer %s: invalid signature on message %s", p.NodeID, env.MessageId)
-			continue
-		}
-
-		if env.SenderId != p.NodeID {
-			log.Printf("peer %s: sender_id mismatch: claimed %s", p.NodeID, env.SenderId)
-			continue
-		}
-
 		switch env.MsgType {
-		case MsgTypeChat:
-			p.handleChat(&env)
 		case MsgTypePeerExchange:
+			// Direct peer-to-peer message: per-peer dedup + signature check.
+			if p.isDuplicate(env.MessageId) {
+				continue
+			}
+			if !verifySignature(&env, p.edPubKey) {
+				log.Printf("peer %s: invalid signature on peer_exchange %s", p.NodeID, env.MessageId)
+				continue
+			}
+			if env.SenderId != p.NodeID {
+				log.Printf("peer %s: sender_id mismatch on peer_exchange: claimed %s", p.NodeID, env.SenderId)
+				continue
+			}
 			p.handlePeerExchange(&env)
+
+		case MsgTypePeerHello, MsgTypePeerHelloAck:
+			// Handshake messages are point-to-point only; never gossip-relay them.
+			continue
+
 		default:
-			log.Printf("peer %s: unknown msg_type %d", p.NodeID, env.MsgType)
+			// All other message types are gossip-eligible:
+			// route to the gossip engine for dedup, signature verification
+			// via keyring, rate limiting, local delivery, and forwarding.
+			if p.onGossipMessage != nil {
+				p.onGossipMessage(p.NodeID, &env)
+			}
 		}
 	}
 }
@@ -228,15 +214,6 @@ func (p *Peer) handlePeerExchange(env *pb.Envelope) {
 	if p.onPeerExchange != nil {
 		p.onPeerExchange(p.NodeID, px.Peers)
 	}
-}
-
-func (p *Peer) handleChat(env *pb.Envelope) {
-	var chat pb.ChatMessage
-	if err := proto.Unmarshal(env.Payload, &chat); err != nil {
-		log.Printf("peer %s: unmarshal chat: %v", p.NodeID, err)
-		return
-	}
-	p.hub.DeliverRemote(chat.Nick, chat.Text)
 }
 
 func (p *Peer) sendHello(hello *pb.PeerHello, msgType uint32) error {
@@ -358,38 +335,12 @@ type HelloConfig struct {
 	ListenAddr string
 }
 
-// signEnvelope signs an envelope with the given ED25519 private key.
-// The signed data is: message_id + sender_id + lamport_ts + msg_type + payload.
-// hop_count is excluded per spec.
+// Wrappers around shared sign/verify helpers from pkg/proto.
 func signEnvelope(env *pb.Envelope, privKey ed25519.PrivateKey) {
-	if len(privKey) != ed25519.PrivateKeySize {
-		log.Printf("signEnvelope: unexpected private key length: %d", len(privKey))
-		return
-	}
-	env.Signature = ed25519.Sign(privKey, envelopeSignData(env))
+	pb.SignEnvelope(env, privKey)
 }
 
 func verifySignature(env *pb.Envelope, pubKey ed25519.PublicKey) bool {
-	if len(pubKey) != ed25519.PublicKeySize {
-		return false
-	}
-	if len(env.Signature) != ed25519.SignatureSize {
-		return false
-	}
-	return ed25519.Verify(pubKey, envelopeSignData(env), env.Signature)
-}
-
-func envelopeSignData(env *pb.Envelope) []byte {
-	var buf bytes.Buffer
-	buf.WriteString(env.MessageId)
-	buf.WriteString(env.SenderId)
-	var ts [8]byte
-	binary.BigEndian.PutUint64(ts[:], env.LamportTs)
-	buf.Write(ts[:])
-	var mt [4]byte
-	binary.BigEndian.PutUint32(mt[:], env.MsgType)
-	buf.Write(mt[:])
-	buf.Write(env.Payload)
-	return buf.Bytes()
+	return pb.VerifyEnvelope(env, pubKey)
 }
 
