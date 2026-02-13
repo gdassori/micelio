@@ -4,18 +4,20 @@ import (
 	"bytes"
 	"context"
 	"fmt"
-	"log"
 	"net"
 	"os"
 	"strings"
 	"sync"
 
 	"micelio/internal/identity"
+	"micelio/internal/logging"
 	"micelio/internal/partyline"
 
 	gossh "golang.org/x/crypto/ssh"
 	"golang.org/x/term"
 )
+
+var sshlog = logging.For("ssh")
 
 // Server is an SSH server that exposes the partyline to connected users.
 type Server struct {
@@ -43,7 +45,7 @@ func NewServer(addr string, id *identity.Identity, hub *partyline.Hub, authKeysP
 
 	s.authKeys = loadAuthorizedKeys(authKeysPath)
 	if len(s.authKeys) == 0 {
-		log.Printf("WARNING: no authorized keys loaded from %s — nobody can authenticate", authKeysPath)
+		sshlog.Warn("no authorized keys loaded", "path", authKeysPath)
 	}
 
 	s.config = &gossh.ServerConfig{
@@ -85,7 +87,7 @@ func (s *Server) Serve(ctx context.Context) error {
 			if ctx.Err() != nil {
 				return nil // clean shutdown
 			}
-			log.Printf("ssh accept: %v", err)
+			sshlog.Warn("accept error", "err", err)
 			continue
 		}
 
@@ -139,12 +141,12 @@ func (s *Server) handleConnection(conn net.Conn) {
 
 	sshConn, chans, reqs, err := gossh.NewServerConn(conn, s.config)
 	if err != nil {
-		log.Printf("ssh handshake from %s: %v", conn.RemoteAddr(), err)
+		sshlog.Warn("handshake failed", "remote", conn.RemoteAddr(), "err", err)
 		return
 	}
 	defer sshConn.Close()
 
-	log.Printf("ssh connection from %s (user: %s)", conn.RemoteAddr(), sshConn.User())
+	sshlog.Info("client connected", "remote", conn.RemoteAddr(), "user", sshConn.User())
 	go gossh.DiscardRequests(reqs)
 
 	for newChan := range chans {
@@ -154,7 +156,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 		}
 		channel, requests, err := newChan.Accept()
 		if err != nil {
-			log.Printf("ssh channel accept: %v", err)
+			sshlog.Warn("channel accept error", "err", err)
 			continue
 		}
 		go s.handleSession(channel, requests, sshConn)

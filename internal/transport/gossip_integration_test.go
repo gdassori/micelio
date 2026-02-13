@@ -3,11 +3,13 @@ package transport_test
 import (
 	"context"
 	"fmt"
+	"log/slog"
 	"testing"
 	"time"
 
 	"micelio/internal/config"
 	"micelio/internal/identity"
+	"micelio/internal/logging"
 	"micelio/internal/partyline"
 	"micelio/internal/transport"
 )
@@ -16,6 +18,9 @@ import (
 // Topology: A─B─C (chain, no discovery). A and C are NOT directly connected.
 // A sends a message → it should reach C via gossip through B.
 func TestGossipChainRelay(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	type testNode struct {
 		id      *identity.Identity
 		hub     *partyline.Hub
@@ -164,11 +169,27 @@ func TestGossipChainRelay(t *testing.T) {
 	if msg := waitForMsg(nodeA.session.Send, 5*time.Second, "carol", "reply from C"); msg == "" {
 		t.Fatal("A did not receive message from C via gossip through B")
 	}
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG log: message received")
+	}
+	if !capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("expected DEBUG log: message forwarded")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }
 
 // TestGossipDedup verifies that the same message is not delivered twice even
 // when it arrives from multiple peers.
 func TestGossipDedup(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	type testNode struct {
 		id      *identity.Identity
 		hub     *partyline.Hub
@@ -318,6 +339,16 @@ func TestGossipDedup(t *testing.T) {
 	if msg := waitForMsg(nodeC.session.Send, 500*time.Millisecond, "alice", "unique-msg"); msg != "" {
 		t.Fatal("C received duplicate message")
 	}
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG log: message received")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }
 
 // TestGossipDefaultHopCountChain verifies multi-hop gossip propagation using
@@ -328,6 +359,8 @@ func TestGossipDedup(t *testing.T) {
 // (e.g., TestEngineHopCountZero). Here we exercise the default hop_count
 // end-to-end over a realistic 4-hop chain.
 func TestGossipDefaultHopCountChain(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
 
 	const N = 5
 	type testNode struct {
@@ -445,5 +478,18 @@ func TestGossipDefaultHopCountChain(t *testing.T) {
 		if msg == "" {
 			t.Fatalf("node %d did not receive message from node 0", i)
 		}
+	}
+
+	if !capture.Has(slog.LevelInfo, "peer connected") {
+		t.Error("expected INFO log: peer connected")
+	}
+	if !capture.Has(slog.LevelDebug, "message received") {
+		t.Error("expected DEBUG log: message received")
+	}
+	if !capture.Has(slog.LevelDebug, "message forwarded") {
+		t.Error("expected DEBUG log: message forwarded")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
 	}
 }

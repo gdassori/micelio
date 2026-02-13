@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"time"
 
 	"micelio/internal/identity"
+	"micelio/internal/logging"
 	"micelio/internal/partyline"
 	sshserver "micelio/internal/ssh"
 
@@ -19,6 +21,9 @@ import (
 )
 
 func TestSSHPartyline(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	tmpDir := t.TempDir()
 
 	// Server identity
@@ -162,4 +167,20 @@ func TestSSHPartyline(t *testing.T) {
 	// /quit
 	send("/quit")
 	waitFor("Goodbye")
+
+	time.Sleep(100 * time.Millisecond) // let server process disconnect
+
+	// Log assertions
+	if !capture.Has(slog.LevelInfo, "client connected") {
+		t.Error("expected INFO log: client connected")
+	}
+	if !capture.Has(slog.LevelDebug, "session joined") {
+		t.Error("expected DEBUG log: session joined")
+	}
+	if !capture.Has(slog.LevelDebug, "session left") {
+		t.Error("expected DEBUG log: session left")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
 }

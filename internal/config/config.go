@@ -28,6 +28,12 @@ type Config struct {
 	Node    NodeConfig    `toml:"node"`
 	SSH     SSHConfig     `toml:"ssh"`
 	Network NetworkConfig `toml:"network"`
+	Logging LoggingConfig `toml:"logging"`
+}
+
+type LoggingConfig struct {
+	Level  string `toml:"level"`  // debug, info, warn, error (default: info)
+	Format string `toml:"format"` // text or json (default: text)
 }
 
 type NodeConfig struct {

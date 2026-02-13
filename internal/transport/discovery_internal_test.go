@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"log/slog"
 	"math"
 	"path/filepath"
 	"testing"
@@ -13,6 +14,7 @@ import (
 
 	"micelio/internal/config"
 	"micelio/internal/identity"
+	"micelio/internal/logging"
 	"micelio/internal/partyline"
 	boltstore "micelio/internal/store/bolt"
 
@@ -56,6 +58,9 @@ func validPeerInfo(t *testing.T, addr string) *pb.PeerInfo {
 }
 
 func TestMergeRejectsMismatchedNodeID(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	mgr := makeTestManager(t)
 
 	pub, _, err := ed25519.GenerateKey(rand.Reader)
@@ -76,6 +81,10 @@ func TestMergeRejectsMismatchedNodeID(t *testing.T) {
 	defer mgr.mu.Unlock()
 	if len(mgr.knownPeers) != 0 {
 		t.Fatalf("expected 0 known peers after mismatched node_id, got %d", len(mgr.knownPeers))
+	}
+
+	if !capture.Has(slog.LevelWarn, "ignoring peer: mismatched node_id") {
+		t.Error("expected WARN log: ignoring peer: mismatched node_id")
 	}
 }
 
@@ -166,6 +175,9 @@ func TestMergeSkipsSelf(t *testing.T) {
 }
 
 func TestMergeAcceptsValidPeer(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	mgr := makeTestManager(t)
 
 	info := validPeerInfo(t, "10.0.0.1:4000")
@@ -182,6 +194,13 @@ func TestMergeAcceptsValidPeer(t *testing.T) {
 	}
 	if rec.Addr != "10.0.0.1:4000" {
 		t.Fatalf("expected addr 10.0.0.1:4000, got %s", rec.Addr)
+	}
+
+	if capture.Count(slog.LevelWarn) != 0 {
+		t.Errorf("unexpected WARN logs: %d", capture.Count(slog.LevelWarn))
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
 	}
 }
 
@@ -376,6 +395,9 @@ func makeTestManagerWithStore(t *testing.T) *Manager {
 // --- saveKnownPeer + loadKnownPeers round-trip ---
 
 func TestSaveAndLoadKnownPeers(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	dir := t.TempDir()
 
 	// Create identity and store
@@ -444,6 +466,13 @@ func TestSaveAndLoadKnownPeers(t *testing.T) {
 	if loaded.PublicKey != hex.EncodeToString(pub) {
 		t.Fatal("public key mismatch after load")
 	}
+
+	if !capture.Has(slog.LevelInfo, "loaded known peers") {
+		t.Error("expected INFO log: loaded known peers")
+	}
+	if capture.Count(slog.LevelWarn) != 0 {
+		t.Errorf("unexpected WARN logs: %d", capture.Count(slog.LevelWarn))
+	}
 }
 
 func TestSaveKnownPeerNilStore(t *testing.T) {
@@ -454,6 +483,9 @@ func TestSaveKnownPeerNilStore(t *testing.T) {
 }
 
 func TestLoadKnownPeersSkipsInvalidRecords(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	dir := t.TempDir()
 	id, err := identity.Load(dir)
 	if err != nil {
@@ -518,6 +550,29 @@ func TestLoadKnownPeersSkipsInvalidRecords(t *testing.T) {
 	}
 	if _, ok := mgr.knownPeers["valid-no-pub"]; !ok {
 		t.Fatal("expected valid-no-pub to be loaded")
+	}
+
+	// Should have WARN logs for each invalid record
+	if !capture.Has(slog.LevelWarn, "unmarshal peer record") {
+		t.Error("expected WARN log: unmarshal peer record")
+	}
+	if !capture.Has(slog.LevelWarn, "skipping peer: empty NodeID") {
+		t.Error("expected WARN log: skipping peer: empty NodeID")
+	}
+	if !capture.Has(slog.LevelWarn, "skipping peer: invalid addr") {
+		t.Error("expected WARN log: skipping peer: invalid addr")
+	}
+	if !capture.Has(slog.LevelWarn, "skipping peer: invalid pubkey encoding") {
+		t.Error("expected WARN log: skipping peer: invalid pubkey encoding")
+	}
+	if !capture.Has(slog.LevelWarn, "skipping peer: invalid pubkey length") {
+		t.Error("expected WARN log: skipping peer: invalid pubkey length")
+	}
+	if !capture.Has(slog.LevelWarn, "skipping peer: mismatched pubkey") {
+		t.Error("expected WARN log: skipping peer: mismatched pubkey")
+	}
+	if !capture.Has(slog.LevelInfo, "loaded known peers") {
+		t.Error("expected INFO log: loaded known peers")
 	}
 }
 

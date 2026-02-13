@@ -4,15 +4,17 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
-	"log"
 	"math/rand/v2"
 	"sync"
 	"time"
 
 	"google.golang.org/protobuf/proto"
 
+	"micelio/internal/logging"
 	pb "micelio/pkg/proto"
 )
+
+var logger = logging.For("gossip")
 
 const (
 	DefaultFanout    = 3
@@ -102,6 +104,7 @@ func (e *Engine) RegisterHandler(msgType uint32, handler MessageHandler) {
 func (e *Engine) HandleIncoming(fromPeerID string, env *pb.Envelope) {
 	// 0. Reject malformed envelopes missing required identifiers.
 	if env.MessageId == "" || env.SenderId == "" {
+		logger.Debug("envelope rejected: empty id")
 		return
 	}
 
@@ -109,6 +112,12 @@ func (e *Engine) HandleIncoming(fromPeerID string, env *pb.Envelope) {
 	if e.Seen.Has(env.MessageId) {
 		return
 	}
+
+	logger.Debug("message received",
+		"msg_id", env.MessageId,
+		"sender", formatShort(env.SenderId),
+		"hop_count", env.HopCount,
+		"msg_type", env.MsgType)
 
 	// 2. Lookup sender in keyring; auto-learn from sender_pubkey if unknown
 	entry, known := e.KeyRing.Lookup(env.SenderId)
@@ -120,27 +129,29 @@ func (e *Engine) HandleIncoming(fromPeerID string, env *pb.Envelope) {
 			if hex.EncodeToString(hash[:]) == env.SenderId {
 				e.KeyRing.Add(env.SenderId, env.SenderPubkey, TrustGossipLearned)
 				entry, known = e.KeyRing.Lookup(env.SenderId)
+				logger.Debug("auto-learned key", "sender", formatShort(env.SenderId))
 			}
 		}
 		if !known {
-			log.Printf("gossip: dropping message %s from unknown sender %s",
-				env.MessageId, formatShort(env.SenderId))
+			logger.Warn("dropping message from unknown sender",
+				"msg_id", env.MessageId,
+				"sender", formatShort(env.SenderId))
 			return
 		}
 	}
 
 	// 3. Verify signature
 	if !pb.VerifyEnvelope(env, entry.PubKey) {
-		log.Printf("gossip: invalid signature on message %s from %s",
-			env.MessageId, formatShort(env.SenderId))
+		logger.Warn("invalid signature",
+			"msg_id", env.MessageId,
+			"sender", formatShort(env.SenderId))
 		return
 	}
 
 	// 4. Rate limit (before marking seen, so rate-limited messages can be
 	// retried when the sender's budget replenishes).
 	if !e.Limiter.Allow(env.SenderId) {
-		log.Printf("gossip: rate limit exceeded for sender %s",
-			formatShort(env.SenderId))
+		logger.Debug("rate limit exceeded", "sender", formatShort(env.SenderId))
 		return
 	}
 
@@ -154,6 +165,9 @@ func (e *Engine) HandleIncoming(fromPeerID string, env *pb.Envelope) {
 	// 6. Deliver to local handler (if registered for this msg_type)
 	if handler, ok := e.handlers[env.MsgType]; ok {
 		handler(env.SenderId, env.Payload)
+		logger.Debug("message delivered locally",
+			"msg_id", env.MessageId,
+			"msg_type", env.MsgType)
 	}
 
 	// 7. Forward if hop count allows
@@ -165,7 +179,7 @@ func (e *Engine) HandleIncoming(fromPeerID string, env *pb.Envelope) {
 	env.HopCount--
 	raw, err := proto.Marshal(env)
 	if err != nil {
-		log.Printf("gossip: marshal for forward: %v", err)
+		logger.Error("marshal for forward", "err", err)
 		return
 	}
 
@@ -181,7 +195,7 @@ func (e *Engine) Broadcast(env *pb.Envelope) {
 
 	raw, err := proto.Marshal(env)
 	if err != nil {
-		log.Printf("gossip: marshal broadcast: %v", err)
+		logger.Error("marshal broadcast", "err", err)
 		return
 	}
 
@@ -219,6 +233,8 @@ func (e *Engine) forwardTo(raw []byte, excludePeerID string) {
 	for _, p := range candidates {
 		p.Send(raw)
 	}
+
+	logger.Debug("message forwarded", "targets", len(candidates))
 }
 
 func formatShort(id string) string {

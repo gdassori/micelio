@@ -1,9 +1,12 @@
 package partyline
 
 import (
+	"log/slog"
 	"strings"
 	"testing"
 	"time"
+
+	"micelio/internal/logging"
 )
 
 func recv(ch <-chan string, timeout time.Duration) string {
@@ -28,6 +31,9 @@ func drain(ch <-chan string, d time.Duration) {
 }
 
 func TestJoinLeave(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	h := NewHub("test-node")
 	go h.Run()
 	defer h.Stop()
@@ -56,9 +62,23 @@ func TestJoinLeave(t *testing.T) {
 	}
 
 	h.Leave(s)
+	time.Sleep(50 * time.Millisecond) // let hub process final leave
+
+	if !capture.Has(slog.LevelDebug, "session joined") {
+		t.Error("expected DEBUG log: session joined")
+	}
+	if !capture.Has(slog.LevelDebug, "session left") {
+		t.Error("expected DEBUG log: session left")
+	}
+	if capture.Count(slog.LevelWarn) != 0 {
+		t.Errorf("unexpected WARN logs: %d", capture.Count(slog.LevelWarn))
+	}
 }
 
 func TestBroadcast(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	h := NewHub("test-node")
 	go h.Run()
 	defer h.Stop()
@@ -84,9 +104,23 @@ func TestBroadcast(t *testing.T) {
 
 	h.Leave(alice)
 	h.Leave(bob)
+	time.Sleep(50 * time.Millisecond)
+
+	if !capture.Has(slog.LevelDebug, "session joined") {
+		t.Error("expected DEBUG log: session joined")
+	}
+	if !capture.Has(slog.LevelDebug, "session left") {
+		t.Error("expected DEBUG log: session left")
+	}
+	if capture.Count(slog.LevelWarn) != 0 {
+		t.Errorf("unexpected WARN logs: %d", capture.Count(slog.LevelWarn))
+	}
 }
 
 func TestWho(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	h := NewHub("test-node")
 	go h.Run()
 	defer h.Stop()
@@ -111,9 +145,20 @@ func TestWho(t *testing.T) {
 
 	h.Leave(alice)
 	h.Leave(bob)
+	time.Sleep(50 * time.Millisecond)
+
+	if !capture.Has(slog.LevelDebug, "session joined") {
+		t.Error("expected DEBUG log: session joined")
+	}
+	if !capture.Has(slog.LevelDebug, "session left") {
+		t.Error("expected DEBUG log: session left")
+	}
 }
 
 func TestSetNick(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	h := NewHub("test-node")
 	go h.Run()
 	defer h.Stop()
@@ -135,9 +180,20 @@ func TestSetNick(t *testing.T) {
 
 	h.Leave(alice)
 	h.Leave(bob)
+	time.Sleep(50 * time.Millisecond)
+
+	if !capture.Has(slog.LevelDebug, "session joined") {
+		t.Error("expected DEBUG log: session joined")
+	}
+	if !capture.Has(slog.LevelDebug, "session left") {
+		t.Error("expected DEBUG log: session left")
+	}
 }
 
 func TestDeliverRemote(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	h := NewHub("test-node")
 	go h.Run()
 	defer h.Stop()
@@ -153,9 +209,20 @@ func TestDeliverRemote(t *testing.T) {
 	}
 
 	h.Leave(s)
+	time.Sleep(50 * time.Millisecond)
+
+	if !capture.Has(slog.LevelDebug, "session joined") {
+		t.Error("expected DEBUG log: session joined")
+	}
+	if !capture.Has(slog.LevelDebug, "session left") {
+		t.Error("expected DEBUG log: session left")
+	}
 }
 
 func TestRemoteSend(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	h := NewHub("test-node")
 	remoteCh := make(chan RemoteMsg, 10)
 	h.SetRemoteSend(remoteCh)
@@ -186,6 +253,15 @@ func TestRemoteSend(t *testing.T) {
 	}
 
 	h.Leave(alice)
+	time.Sleep(50 * time.Millisecond)
+
+	if !capture.Has(slog.LevelDebug, "session joined") {
+		t.Error("expected DEBUG log: session joined")
+	}
+	// No buffer-full warnings expected (channel has buffer of 10)
+	if capture.Has(slog.LevelWarn, "remote send buffer full") {
+		t.Error("unexpected WARN: remote send buffer full")
+	}
 }
 
 func TestNodeName(t *testing.T) {
@@ -196,6 +272,9 @@ func TestNodeName(t *testing.T) {
 }
 
 func TestSystemMessage(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
 	h := NewHub("test-node")
 	go h.Run()
 	defer h.Stop()
@@ -211,4 +290,35 @@ func TestSystemMessage(t *testing.T) {
 	}
 
 	h.Leave(s)
+	time.Sleep(50 * time.Millisecond)
+
+	if !capture.Has(slog.LevelDebug, "session joined") {
+		t.Error("expected DEBUG log: session joined")
+	}
+	if !capture.Has(slog.LevelDebug, "session left") {
+		t.Error("expected DEBUG log: session left")
+	}
+}
+
+func TestRemoteSendBufferFull(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
+	h := NewHub("test-node")
+	remoteCh := make(chan RemoteMsg) // unbuffered, no reader — always full
+	h.SetRemoteSend(remoteCh)
+	go h.Run()
+	defer h.Stop()
+
+	alice := h.Join("alice")
+	drain(alice.Send, 100*time.Millisecond)
+
+	h.Broadcast(alice, "will-drop")
+	time.Sleep(100 * time.Millisecond) // let hub process the broadcast
+
+	if !capture.Has(slog.LevelWarn, "remote send buffer full") {
+		t.Error("expected WARN log: remote send buffer full")
+	}
+
+	h.Leave(alice)
 }
