@@ -10,7 +10,7 @@ The `Envelope` is the universal wrapper for every message exchanged between peer
 message Envelope {
     string message_id   = 1;   // UUID v4, unique per message
     string sender_id    = 2;   // node_id of originator
-    uint64 lamport_ts   = 3;   // Lamport clock (reserved, unused in Phase 2)
+    uint64 lamport_ts   = 3;   // Lamport timestamp (included in signatures; currently 0)
     uint32 hop_count    = 4;   // decremented at each hop
     uint32 msg_type     = 5;   // payload type discriminator
     bytes  payload      = 6;   // serialized inner message
@@ -25,7 +25,7 @@ message Envelope {
 |-------|------|-------------|
 | `message_id` | string | UUID v4. Globally unique. Used for deduplication. |
 | `sender_id` | string | Node ID of the originating node (64 hex chars). |
-| `lamport_ts` | uint64 | Lamport timestamp at send time. Reserved for future use (Phase 5). |
+| `lamport_ts` | uint64 | Lamport timestamp. Included in signature computation. Currently set to 0; will carry meaningful values in Phase 5 (distributed state). |
 | `hop_count` | uint32 | TTL decremented at each relay hop. Messages with `hop_count <= 1` are delivered locally but not forwarded. |
 | `msg_type` | uint32 | Discriminator for the `payload` contents. See [Message Types](#message-types). |
 | `payload` | bytes | Serialized inner protobuf message. |
@@ -144,7 +144,7 @@ message ChatMessage {
 
 ## PeerExchange
 
-Carries a list of known reachable peers for automatic mesh formation (Phase 3).
+Carries a list of known reachable peers for automatic mesh formation.
 
 ```protobuf
 message PeerInfo {

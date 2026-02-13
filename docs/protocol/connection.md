@@ -140,19 +140,18 @@ If the send buffer is full, messages are dropped with a log warning. This provid
 
 ### Receive Loop
 
-Reads framed messages from the Noise connection, deserializes the `Envelope`, and processes them:
+Reads framed messages from the Noise connection, deserializes the `Envelope`, and dispatches by message type:
 
-1. **Deduplication check.** If `message_id` has been seen before, the message is dropped.
-2. **Signature verification.** The envelope signature is verified against the peer's ED25519 key.
-3. **Sender verification.** The envelope's `sender_id` must match the peer's Node ID.
-4. **Dispatch by type:**
-    - `MsgTypeChat` (3): Deserialize `ChatMessage`, deliver to local Hub.
-    - `MsgTypePeerExchange` (4): Deserialize `PeerExchange`, merge into known peers table.
-    - Unknown types are logged and dropped.
+- **PeerHello / PeerHelloAck** (msg_type 1, 2): Silently dropped. These are point-to-point handshake messages and must never appear after the initial exchange.
+- **PeerExchange** (msg_type 4): Handled directly at the peer level — per-peer deduplication, signature verification against the peer's known ED25519 key, sender verification (`sender_id` must match the peer's Node ID), then routed to the manager's `onPeerExchange` callback for merging into the known peers table.
+- **All other types** (including ChatMessage, msg_type 3): Routed to the [gossip engine](../architecture.md#gossip-engine) via the `onGossipMessage` callback. The gossip engine performs centralized deduplication, key lookup with [auto-learn](messages.md#auto-learn), signature verification, rate limiting, local delivery to registered handlers, and forwarding to a random peer subset if `hop_count > 1`.
 
 ### Seen Set Cleanup
 
-A background goroutine runs every 60 seconds, removing entries from the seen set that are older than 5 minutes. This bounds memory usage while maintaining deduplication across reasonable network delays.
+Two levels of deduplication operate concurrently:
+
+- **Gossip engine seen cache**: Centralized deduplication for all gossip-routed messages. Entries expire after 5 minutes; a cleanup goroutine runs every 60 seconds.
+- **Per-peer seen set**: Used only for PeerExchange deduplication at the peer connection level. A per-peer cleanup goroutine runs every 60 seconds, removing entries older than 5 minutes.
 
 ## Disconnection
 
