@@ -226,6 +226,37 @@ echo "$measures" | jq -r '
   end
 '
 
+# Show files with duplicated blocks
+dup_tree=$(sonar_api "measures/component_tree" \
+  "component=$PROJECT&$SCOPE_PARAM&metricKeys=duplicated_blocks&metricSort=duplicated_blocks&s=metric&asc=false&ps=20&qualifiers=FIL")
+
+n_dup_files=$(echo "$dup_tree" | jq '[.components[]? | select((.measures[]?.value // "0") != "0")] | length')
+
+if [[ "$n_dup_files" -gt 0 ]]; then
+  echo ""
+  echo "--- Duplicated Files ---"
+  echo "$dup_tree" | jq -r '
+    [.components[]? | select((.measures[]?.value // "0") != "0")] |
+    sort_by(-(.measures[0].value | tonumber)) | .[] |
+    "  \(.measures[0].value) blocks  \(.key | sub(".*:"; ""))"
+  '
+
+  # Fetch duplication block details for each file
+  echo ""
+  echo "--- Duplication Blocks ---"
+  echo "$dup_tree" | jq -r '
+    [.components[]? | select((.measures[]?.value // "0") != "0")] | .[].key
+  ' | while read -r comp_key; do
+    dup_detail=$(sonar_api "duplications/show" "key=$comp_key")
+    short_name=$(echo "$comp_key" | sed 's/.*://')
+    echo "$dup_detail" | jq -r --arg file "$short_name" '
+      .duplications[]? |
+      [.blocks[] | "\(.from)-\(.from + .size - 1) in \(._ref // "1")"] |
+      "  \($file): " + join(" ↔ ")
+    '
+  done
+fi
+
 # ── Write JSON report ──────────────────────────────────────────────────────
 
 report="sonar-report.json"

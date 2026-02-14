@@ -24,6 +24,7 @@ type Server struct {
 	addr     string
 	id       *identity.Identity
 	hub      *partyline.Hub
+	commands *CommandRegistry
 	authKeys []gossh.PublicKey
 	config   *gossh.ServerConfig
 	listener net.Listener
@@ -36,11 +37,15 @@ type Server struct {
 // file in OpenSSH format. If the file doesn't exist, the server starts but
 // rejects all connections.
 func NewServer(addr string, id *identity.Identity, hub *partyline.Hub, authKeysPath string) (*Server, error) {
+	registry := NewCommandRegistry()
+	registry.RegisterBuiltins()
+
 	s := &Server{
-		addr:  addr,
-		id:    id,
-		hub:   hub,
-		conns: make(map[net.Conn]struct{}),
+		addr:     addr,
+		id:       id,
+		hub:      hub,
+		commands: registry,
+		conns:    make(map[net.Conn]struct{}),
 	}
 
 	s.authKeys = loadAuthorizedKeys(authKeysPath)
@@ -57,6 +62,8 @@ func NewServer(addr string, id *identity.Identity, hub *partyline.Hub, authKeysP
 }
 
 // Listen binds the server socket. Call Serve to start accepting connections.
+// Once Listen is called, the command registry is frozen and no new commands
+// can be registered.
 func (s *Server) Listen() error {
 	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
@@ -65,6 +72,10 @@ func (s *Server) Listen() error {
 	s.mu.Lock()
 	s.listener = ln
 	s.mu.Unlock()
+
+	// Freeze the command registry to prevent registration after server starts
+	s.commands.Freeze()
+
 	return nil
 }
 
@@ -237,7 +248,7 @@ func (s *Server) runTerminal(ch gossh.Channel, conn *gossh.ServerConn) {
 			continue
 		}
 		if strings.HasPrefix(line, "/") {
-			if s.handleCommand(line, session, terminal) {
+			if s.commands.Dispatch(line, session, terminal, s.hub) {
 				return // /quit
 			}
 			continue
@@ -249,42 +260,12 @@ func (s *Server) runTerminal(ch gossh.Channel, conn *gossh.ServerConn) {
 	<-done
 }
 
-func (s *Server) handleCommand(line string, session *partyline.Session, terminal *term.Terminal) bool {
-	parts := strings.Fields(line)
-	cmd := parts[0]
-	args := parts[1:]
-
-	switch cmd {
-	case "/quit":
-		_, _ = fmt.Fprintln(terminal, "Goodbye.")
-		s.hub.Leave(session)
-		return true
-
-	case "/who":
-		nicks := s.hub.Who()
-		_, _ = fmt.Fprintf(terminal, "Online (%d): %s\r\n", len(nicks), strings.Join(nicks, ", "))
-
-	case "/nick":
-		if len(args) == 0 {
-			_, _ = fmt.Fprintln(terminal, "Usage: /nick <name>")
-			return false
-		}
-		newNick := args[0]
-		s.hub.SetNick(session, newNick)
-		terminal.SetPrompt(fmt.Sprintf("[%s]> ", newNick))
-
-	case "/help":
-		_, _ = fmt.Fprintln(terminal, "Commands:")
-		_, _ = fmt.Fprintln(terminal, "  /who          — list online users")
-		_, _ = fmt.Fprintln(terminal, "  /nick <name>  — change your nickname")
-		_, _ = fmt.Fprintln(terminal, "  /quit         — disconnect")
-		_, _ = fmt.Fprintln(terminal, "  /help         — show this help")
-
-	default:
-		_, _ = fmt.Fprintf(terminal, "Unknown command: %s (try /help)\r\n", cmd)
-	}
-
-	return false
+// Commands returns the server's command registry, allowing external packages
+// to register additional commands before the server starts.
+// Returns a CommandRegistrar interface to restrict access to registration methods only.
+// Once Listen is called, the registry is frozen and Register will panic.
+func (s *Server) Commands() CommandRegistrar {
+	return s.commands
 }
 
 func loadAuthorizedKeys(path string) []gossh.PublicKey {

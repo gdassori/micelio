@@ -258,3 +258,49 @@ func TestSSHServerStart(t *testing.T) {
 		t.Fatal("Start did not return after cancel+stop")
 	}
 }
+
+func TestCommandRegistryFreezesAfterListen(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	id, err := identity.Load(tmpDir)
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+
+	hub := partyline.NewHub("freeze-test")
+	go hub.Run()
+	defer hub.Stop()
+
+	srv, err := sshserver.NewServer("127.0.0.1:0", id, hub, filepath.Join(tmpDir, "authorized_keys"))
+	if err != nil {
+		t.Fatalf("creating server: %v", err)
+	}
+
+	// Should be able to register before Listen
+	srv.Commands().Register("/custom", sshserver.Command{
+		Help: "custom command",
+		Handler: func(_ sshserver.CommandContext) bool { return false },
+	})
+
+	// Listen freezes the registry
+	if err := srv.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer srv.Stop()
+
+	// Attempting to register after Listen should panic
+	defer func() {
+		r := recover()
+		if r == nil {
+			t.Fatal("expected panic when registering after Listen")
+		}
+		msg, ok := r.(string)
+		if !ok || !strings.Contains(msg, "frozen") {
+			t.Errorf("unexpected panic value: %v", r)
+		}
+	}()
+	srv.Commands().Register("/toobad", sshserver.Command{
+		Help: "should panic",
+		Handler: func(_ sshserver.CommandContext) bool { return false },
+	})
+}
