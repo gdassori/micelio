@@ -109,6 +109,7 @@ func (m *Manager) Start(ctx context.Context) error {
 	if m.cfg.Network.Listen != "" {
 		ln, err := net.Listen("tcp", m.cfg.Network.Listen)
 		if err != nil {
+			m.gossip.Stop()
 			return fmt.Errorf("transport listen: %w", err)
 		}
 		m.mu.Lock()
