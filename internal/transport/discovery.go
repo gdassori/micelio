@@ -144,6 +144,7 @@ func (m *Manager) onPeerConnected(p *Peer) {
 
 	go m.saveKnownPeer(&snapshot)
 	m.sendPeerExchangeTo(p)
+	m.sendStateSyncRequestTo(p)
 }
 
 // exchangeLoop periodically sends PeerExchange to all connected peers.

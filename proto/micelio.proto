@@ -58,3 +58,24 @@ message PeerInfo {
 message PeerExchange {
     repeated PeerInfo peers = 1;
 }
+
+// StateEntry represents a single key-value pair with LWW metadata.
+message StateEntry {
+    string key        = 1;
+    bytes  value      = 2;
+    uint64 lamport_ts = 3;  // per-entry Lamport clock
+    string node_id    = 4;  // originator node_id (for tie-breaking)
+}
+
+// StateUpdate carries a single state change (msg_type=6, gossip-relayed).
+message StateUpdate {
+    StateEntry entry = 1;
+}
+
+// StateSyncRequest asks a peer to send its full state (msg_type=7, direct).
+message StateSyncRequest {}
+
+// StateSyncResponse carries the full state snapshot (msg_type=8, direct).
+message StateSyncResponse {
+    repeated StateEntry entries = 1;
+}

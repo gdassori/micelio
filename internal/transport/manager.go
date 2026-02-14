@@ -17,6 +17,7 @@ import (
 	"micelio/internal/identity"
 	"micelio/internal/logging"
 	"micelio/internal/partyline"
+	"micelio/internal/state"
 	"micelio/internal/store"
 	pb "micelio/pkg/proto"
 )
@@ -31,6 +32,7 @@ type Manager struct {
 	noiseKey noise.DHKey
 	store    store.Store // nil in tests
 	gossip   *gossip.Engine
+	stateMap *state.Map // distributed state map
 
 	mu             sync.Mutex
 	peers          map[string]*Peer       // nodeID → Peer
@@ -41,6 +43,7 @@ type Manager struct {
 	listenAddr     string // actual bound address (set after Listen)
 
 	remoteSend chan partyline.RemoteMsg
+	persistCh  chan state.Entry // buffered channel for write-behind persistence
 	done       chan struct{}
 	closeOnce  sync.Once
 
@@ -78,6 +81,7 @@ func NewManager(cfg *config.Config, id *identity.Identity, hub *partyline.Hub, s
 		dialing:        make(map[string]bool),
 		bootstrapAddrs: bootstrapSet,
 		remoteSend:     remoteSend,
+		persistCh:      make(chan state.Entry, 256),
 		done:           make(chan struct{}),
 	}
 
@@ -96,6 +100,63 @@ func NewManager(cfg *config.Config, id *identity.Identity, hub *partyline.Hub, s
 
 	// Add self to keyring so our own messages (reflected via gossip) can be verified.
 	mgr.gossip.KeyRing.Add(id.NodeID, id.PublicKey, gossip.TrustDirectlyVerified)
+
+	// Create the distributed state map and load persisted state.
+	stateMap := state.NewMap(id.NodeID)
+	if err := stateMap.LoadFromStore(st); err != nil {
+		return nil, fmt.Errorf("loading state: %w", err)
+	}
+	mgr.stateMap = stateMap
+
+	// Broadcast state changes via gossip when local writes win LWW.
+	stateMap.SetChangeHandler(func(entry state.Entry) {
+		update := &pb.StateUpdate{
+			Entry: &pb.StateEntry{
+				Key:       entry.Key,
+				Value:     entry.Value,
+				LamportTs: entry.LamportTs,
+				NodeId:    entry.NodeID,
+			},
+		}
+		payload, err := proto.Marshal(update)
+		if err != nil {
+			tlog.Error("marshal state_update", "err", err)
+			return
+		}
+		env := &pb.Envelope{
+			MessageId:    uuid.New().String(),
+			SenderId:     id.NodeID,
+			MsgType:      MsgTypeStateUpdate,
+			HopCount:     mgr.gossip.MaxHops(),
+			Payload:      payload,
+			SenderPubkey: id.PublicKey,
+		}
+		pb.SignEnvelope(env, id.PrivateKey)
+		mgr.gossip.Broadcast(env)
+		mgr.enqueuePersist(entry)
+	})
+
+	// Register state update handler: merge remote updates into local map.
+	mgr.gossip.RegisterHandler(MsgTypeStateUpdate, func(senderID string, payload []byte) {
+		var update pb.StateUpdate
+		if err := proto.Unmarshal(payload, &update); err != nil {
+			tlog.Error("unmarshal state_update", "err", err)
+			return
+		}
+		if update.Entry == nil {
+			tlog.Warn("state_update with nil entry", "sender", formatNodeIDShort(senderID))
+			return
+		}
+		entry := state.Entry{
+			Key:       update.Entry.Key,
+			Value:     update.Entry.Value,
+			LamportTs: update.Entry.LamportTs,
+			NodeID:    update.Entry.NodeId,
+		}
+		if mgr.stateMap.Merge(entry) {
+			mgr.enqueuePersist(entry)
+		}
+	})
 
 	mgr.loadKnownPeers()
 
@@ -123,6 +184,9 @@ func (m *Manager) Start(ctx context.Context) error {
 		go m.dialWithBackoff(ctx, addr)
 	}
 
+	if m.store != nil {
+		go m.persistLoop()
+	}
 	go m.fanoutLoop(ctx)
 	go m.exchangeLoop(ctx)
 	go m.discoveryLoop(ctx)
@@ -156,6 +220,11 @@ func (m *Manager) Addr() string {
 		return ""
 	}
 	return ln.Addr().String()
+}
+
+// StateMap returns the distributed state map. May be nil if not initialized.
+func (m *Manager) StateMap() *state.Map {
+	return m.stateMap
 }
 
 // PeerCount returns the number of connected peers.
@@ -337,6 +406,8 @@ func (m *Manager) addPeer(p *Peer) string {
 	}
 	p.onPeerExchange = m.peerExchangeHandler()
 	p.onGossipMessage = m.gossipMessageHandler()
+	p.onStateSyncRequest = m.stateSyncRequestHandler()
+	p.onStateSyncResponse = m.stateSyncResponseHandler()
 	m.peers[p.NodeID] = p
 	return ""
 }
@@ -457,5 +528,38 @@ func (m *Manager) applyPeerTimeouts(p *Peer) {
 	}
 	if writeTimeout > 0 {
 		p.writeTimeout.Store(int64(writeTimeout))
+	}
+}
+
+// enqueuePersist sends an entry to the persist worker. If the buffer is full
+// the entry is dropped with a warning — bbolt serializes writes internally,
+// so unbounded goroutine spawning is worse than occasionally losing a persist
+// (the entry is still in memory and will be re-persisted on the next update).
+func (m *Manager) enqueuePersist(entry state.Entry) {
+	select {
+	case m.persistCh <- entry:
+	default:
+		tlog.Warn("persist buffer full, dropping write", "key", entry.Key)
+	}
+}
+
+// persistLoop drains the persist channel and writes entries to the store.
+// Runs as a single goroutine to bound concurrency on bbolt writes.
+func (m *Manager) persistLoop() {
+	for {
+		select {
+		case entry := <-m.persistCh:
+			state.PersistEntry(m.store, entry)
+		case <-m.done:
+			// Drain remaining entries before exiting.
+			for {
+				select {
+				case entry := <-m.persistCh:
+					state.PersistEntry(m.store, entry)
+				default:
+					return
+				}
+			}
+		}
 	}
 }

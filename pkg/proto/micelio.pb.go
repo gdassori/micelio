@@ -478,6 +478,202 @@ func (x *PeerExchange) GetPeers() []*PeerInfo {
 	return nil
 }
 
+// StateEntry represents a single key-value pair with LWW metadata.
+type StateEntry struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
+	Value         []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
+	LamportTs     uint64                 `protobuf:"varint,3,opt,name=lamport_ts,json=lamportTs,proto3" json:"lamport_ts,omitempty"` // per-entry Lamport clock
+	NodeId        string                 `protobuf:"bytes,4,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`           // originator node_id (for tie-breaking)
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StateEntry) Reset() {
+	*x = StateEntry{}
+	mi := &file_proto_micelio_proto_msgTypes[6]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateEntry) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateEntry) ProtoMessage() {}
+
+func (x *StateEntry) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_micelio_proto_msgTypes[6]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateEntry.ProtoReflect.Descriptor instead.
+func (*StateEntry) Descriptor() ([]byte, []int) {
+	return file_proto_micelio_proto_rawDescGZIP(), []int{6}
+}
+
+func (x *StateEntry) GetKey() string {
+	if x != nil {
+		return x.Key
+	}
+	return ""
+}
+
+func (x *StateEntry) GetValue() []byte {
+	if x != nil {
+		return x.Value
+	}
+	return nil
+}
+
+func (x *StateEntry) GetLamportTs() uint64 {
+	if x != nil {
+		return x.LamportTs
+	}
+	return 0
+}
+
+func (x *StateEntry) GetNodeId() string {
+	if x != nil {
+		return x.NodeId
+	}
+	return ""
+}
+
+// StateUpdate carries a single state change (msg_type=6, gossip-relayed).
+type StateUpdate struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entry         *StateEntry            `protobuf:"bytes,1,opt,name=entry,proto3" json:"entry,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StateUpdate) Reset() {
+	*x = StateUpdate{}
+	mi := &file_proto_micelio_proto_msgTypes[7]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateUpdate) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateUpdate) ProtoMessage() {}
+
+func (x *StateUpdate) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_micelio_proto_msgTypes[7]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateUpdate.ProtoReflect.Descriptor instead.
+func (*StateUpdate) Descriptor() ([]byte, []int) {
+	return file_proto_micelio_proto_rawDescGZIP(), []int{7}
+}
+
+func (x *StateUpdate) GetEntry() *StateEntry {
+	if x != nil {
+		return x.Entry
+	}
+	return nil
+}
+
+// StateSyncRequest asks a peer to send its full state (msg_type=7, direct).
+type StateSyncRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StateSyncRequest) Reset() {
+	*x = StateSyncRequest{}
+	mi := &file_proto_micelio_proto_msgTypes[8]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateSyncRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateSyncRequest) ProtoMessage() {}
+
+func (x *StateSyncRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_micelio_proto_msgTypes[8]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateSyncRequest.ProtoReflect.Descriptor instead.
+func (*StateSyncRequest) Descriptor() ([]byte, []int) {
+	return file_proto_micelio_proto_rawDescGZIP(), []int{8}
+}
+
+// StateSyncResponse carries the full state snapshot (msg_type=8, direct).
+type StateSyncResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Entries       []*StateEntry          `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *StateSyncResponse) Reset() {
+	*x = StateSyncResponse{}
+	mi := &file_proto_micelio_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *StateSyncResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*StateSyncResponse) ProtoMessage() {}
+
+func (x *StateSyncResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_proto_micelio_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use StateSyncResponse.ProtoReflect.Descriptor instead.
+func (*StateSyncResponse) Descriptor() ([]byte, []int) {
+	return file_proto_micelio_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *StateSyncResponse) GetEntries() []*StateEntry {
+	if x != nil {
+		return x.Entries
+	}
+	return nil
+}
+
 var File_proto_micelio_proto protoreflect.FileDescriptor
 
 const file_proto_micelio_proto_rawDesc = "" +
@@ -521,7 +717,19 @@ const file_proto_micelio_proto_rawDesc = "" +
 	"\x0eed25519_pubkey\x18\x04 \x01(\fR\red25519Pubkey\x12\x1b\n" +
 	"\tlast_seen\x18\x05 \x01(\x04R\blastSeen\"7\n" +
 	"\fPeerExchange\x12'\n" +
-	"\x05peers\x18\x01 \x03(\v2\x11.micelio.PeerInfoR\x05peersB\x13Z\x11micelio/pkg/protob\x06proto3"
+	"\x05peers\x18\x01 \x03(\v2\x11.micelio.PeerInfoR\x05peers\"l\n" +
+	"\n" +
+	"StateEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\fR\x05value\x12\x1d\n" +
+	"\n" +
+	"lamport_ts\x18\x03 \x01(\x04R\tlamportTs\x12\x17\n" +
+	"\anode_id\x18\x04 \x01(\tR\x06nodeId\"8\n" +
+	"\vStateUpdate\x12)\n" +
+	"\x05entry\x18\x01 \x01(\v2\x13.micelio.StateEntryR\x05entry\"\x12\n" +
+	"\x10StateSyncRequest\"B\n" +
+	"\x11StateSyncResponse\x12-\n" +
+	"\aentries\x18\x01 \x03(\v2\x13.micelio.StateEntryR\aentriesB\x13Z\x11micelio/pkg/protob\x06proto3"
 
 var (
 	file_proto_micelio_proto_rawDescOnce sync.Once
@@ -535,22 +743,28 @@ func file_proto_micelio_proto_rawDescGZIP() []byte {
 	return file_proto_micelio_proto_rawDescData
 }
 
-var file_proto_micelio_proto_msgTypes = make([]protoimpl.MessageInfo, 6)
+var file_proto_micelio_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
 var file_proto_micelio_proto_goTypes = []any{
-	(*Envelope)(nil),     // 0: micelio.Envelope
-	(*PeerHello)(nil),    // 1: micelio.PeerHello
-	(*PeerHelloAck)(nil), // 2: micelio.PeerHelloAck
-	(*ChatMessage)(nil),  // 3: micelio.ChatMessage
-	(*PeerInfo)(nil),     // 4: micelio.PeerInfo
-	(*PeerExchange)(nil), // 5: micelio.PeerExchange
+	(*Envelope)(nil),          // 0: micelio.Envelope
+	(*PeerHello)(nil),         // 1: micelio.PeerHello
+	(*PeerHelloAck)(nil),      // 2: micelio.PeerHelloAck
+	(*ChatMessage)(nil),       // 3: micelio.ChatMessage
+	(*PeerInfo)(nil),          // 4: micelio.PeerInfo
+	(*PeerExchange)(nil),      // 5: micelio.PeerExchange
+	(*StateEntry)(nil),        // 6: micelio.StateEntry
+	(*StateUpdate)(nil),       // 7: micelio.StateUpdate
+	(*StateSyncRequest)(nil),  // 8: micelio.StateSyncRequest
+	(*StateSyncResponse)(nil), // 9: micelio.StateSyncResponse
 }
 var file_proto_micelio_proto_depIdxs = []int32{
 	4, // 0: micelio.PeerExchange.peers:type_name -> micelio.PeerInfo
-	1, // [1:1] is the sub-list for method output_type
-	1, // [1:1] is the sub-list for method input_type
-	1, // [1:1] is the sub-list for extension type_name
-	1, // [1:1] is the sub-list for extension extendee
-	0, // [0:1] is the sub-list for field type_name
+	6, // 1: micelio.StateUpdate.entry:type_name -> micelio.StateEntry
+	6, // 2: micelio.StateSyncResponse.entries:type_name -> micelio.StateEntry
+	3, // [3:3] is the sub-list for method output_type
+	3, // [3:3] is the sub-list for method input_type
+	3, // [3:3] is the sub-list for extension type_name
+	3, // [3:3] is the sub-list for extension extendee
+	0, // [0:3] is the sub-list for field type_name
 }
 
 func init() { file_proto_micelio_proto_init() }
@@ -564,7 +778,7 @@ func file_proto_micelio_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_micelio_proto_rawDesc), len(file_proto_micelio_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   6,
+			NumMessages:   10,
 			NumExtensions: 0,
 			NumServices:   0,
 		},
