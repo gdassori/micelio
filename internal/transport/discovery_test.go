@@ -81,7 +81,7 @@ func TestThreeNodeMesh(t *testing.T) {
 	}
 	nodeB.mgr = mgrB
 	go nodeB.hub.Run()
-	go mgrB.Start(nodeB.ctx)
+	go func() { _ = mgrB.Start(nodeB.ctx) }()
 
 	// Wait for B's listener
 	deadline := time.Now().Add(5 * time.Second)
@@ -110,7 +110,7 @@ func TestThreeNodeMesh(t *testing.T) {
 	}
 	nodeA.mgr = mgrA
 	go nodeA.hub.Run()
-	go mgrA.Start(nodeA.ctx)
+	go func() { _ = mgrA.Start(nodeA.ctx) }()
 
 	// Wait for A↔B connection
 	deadline = time.Now().Add(5 * time.Second)
@@ -141,7 +141,7 @@ func TestThreeNodeMesh(t *testing.T) {
 	}
 	nodeC.mgr = mgrC
 	go nodeC.hub.Run()
-	go mgrC.Start(nodeC.ctx)
+	go func() { _ = mgrC.Start(nodeC.ctx) }()
 
 	// Wait for full mesh: each node has 2 peers (A↔B, B↔C, A↔C via discovery)
 	deadline = time.Now().Add(30 * time.Second)
@@ -258,7 +258,7 @@ func TestChainToMesh(t *testing.T) {
 		}
 		nodes[i].mgr = mgr
 		go nodes[i].hub.Run()
-		go mgr.Start(nodes[i].ctx)
+		go func() { _ = mgr.Start(nodes[i].ctx) }()
 
 		// Wait for listener
 		deadline := time.Now().Add(5 * time.Second)
@@ -432,7 +432,7 @@ func TestMaxPeersEnforcement(t *testing.T) {
 	}
 	center.mgr = mgrCenter
 	go center.hub.Run()
-	go mgrCenter.Start(center.ctx)
+	go func() { _ = mgrCenter.Start(center.ctx) }()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for mgrCenter.Addr() == "" && time.Now().Before(deadline) {
@@ -451,7 +451,7 @@ func TestMaxPeersEnforcement(t *testing.T) {
 	}
 	spoke1.mgr = mgrS1
 	go spoke1.hub.Run()
-	go mgrS1.Start(spoke1.ctx)
+	go func() { _ = mgrS1.Start(spoke1.ctx) }()
 
 	// Wait for spoke1 to connect
 	deadline = time.Now().Add(5 * time.Second)
@@ -476,7 +476,7 @@ func TestMaxPeersEnforcement(t *testing.T) {
 	}
 	spoke2.mgr = mgrS2
 	go spoke2.hub.Run()
-	go mgrS2.Start(spoke2.ctx)
+	go func() { _ = mgrS2.Start(spoke2.ctx) }()
 
 	// Give spoke2 time to attempt connection
 	time.Sleep(2 * time.Second)
@@ -568,7 +568,7 @@ func TestTenNodeMultiIP(t *testing.T) {
 		}
 		nodes[i].mgr = mgr
 		go nodes[i].hub.Run()
-		go mgr.Start(nodes[i].ctx)
+		go func() { _ = mgr.Start(nodes[i].ctx) }()
 
 		deadline := time.Now().Add(5 * time.Second)
 		for mgr.Addr() == "" && time.Now().Before(deadline) {

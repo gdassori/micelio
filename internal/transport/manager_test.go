@@ -89,7 +89,7 @@ func TestTwoNodeChat(t *testing.T) {
 
 	ctxB, cancelB := context.WithCancel(context.Background())
 	defer cancelB()
-	go mgrB.Start(ctxB)
+	go func() { _ = mgrB.Start(ctxB) }()
 
 	// Wait for B's listener
 	deadline := time.Now().Add(5 * time.Second)
@@ -118,7 +118,7 @@ func TestTwoNodeChat(t *testing.T) {
 
 	ctxA, cancelA := context.WithCancel(context.Background())
 	defer cancelA()
-	go mgrA.Start(ctxA)
+	go func() { _ = mgrA.Start(ctxA) }()
 
 	// Wait for connection
 	deadline = time.Now().Add(5 * time.Second)
@@ -233,7 +233,7 @@ func TestTenNodeStar(t *testing.T) {
 
 	// Start center hub and listener
 	go nodes[0].hub.Run()
-	go mgr0.Start(nodes[0].ctx)
+	go func() { _ = mgr0.Start(nodes[0].ctx) }()
 
 	// Wait for center listener
 	deadline := time.Now().Add(5 * time.Second)
@@ -265,7 +265,7 @@ func TestTenNodeStar(t *testing.T) {
 	// Now start all spoke hubs and managers.
 	for i := 1; i < N; i++ {
 		go nodes[i].hub.Run()
-		go nodes[i].mgr.Start(nodes[i].ctx)
+		go func() { _ = nodes[i].mgr.Start(nodes[i].ctx) }()
 	}
 
 	// Wait until center has all 9 spokes connected
@@ -451,7 +451,7 @@ func TestOutboundBridge(t *testing.T) {
 		}
 		n.mgr = mgr
 		go n.hub.Run() // Start hub after manager (SetRemoteSend) to avoid data race.
-		go mgr.Start(n.ctx)
+		go func() { _ = mgr.Start(n.ctx) }()
 		dl := time.Now().Add(5 * time.Second)
 		for mgr.Addr() == "" && time.Now().Before(dl) {
 			time.Sleep(10 * time.Millisecond)
@@ -479,7 +479,7 @@ func TestOutboundBridge(t *testing.T) {
 		}
 		n.mgr = mgr
 		go n.hub.Run() // Start hub after manager (SetRemoteSend) to avoid data race.
-		go mgr.Start(n.ctx)
+		go func() { _ = mgr.Start(n.ctx) }()
 	}
 
 	// Boot Net A
@@ -523,7 +523,7 @@ func TestOutboundBridge(t *testing.T) {
 	}
 	bridge.mgr = mgrBridge
 	go bridge.hub.Run() // Start hub after manager to avoid data race.
-	go mgrBridge.Start(bridge.ctx)
+	go func() { _ = mgrBridge.Start(bridge.ctx) }()
 
 	// Bridge should connect to both centers
 	waitPeers(mgrBridge, 2, "bridge")

@@ -31,6 +31,10 @@ go.work.sum
 # .idea/
 # .vscode/
 
+# SonarCloud
+sonar-report.json
+sonarqube*.json
+
 # Micelio
 bin/
 *.db

@@ -75,7 +75,7 @@ func TestGossipChainRelay(t *testing.T) {
 	}
 	nodeB.mgr = mgrB
 	go nodeB.hub.Run()
-	go mgrB.Start(nodeB.ctx)
+	go func() { _ = mgrB.Start(nodeB.ctx) }()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for mgrB.Addr() == "" && time.Now().Before(deadline) {
@@ -99,7 +99,7 @@ func TestGossipChainRelay(t *testing.T) {
 	}
 	nodeA.mgr = mgrA
 	go nodeA.hub.Run()
-	go mgrA.Start(nodeA.ctx)
+	go func() { _ = mgrA.Start(nodeA.ctx) }()
 
 	// Start C — bootstraps to B only (does NOT know A)
 	cfgC := &config.Config{
@@ -117,7 +117,7 @@ func TestGossipChainRelay(t *testing.T) {
 	}
 	nodeC.mgr = mgrC
 	go nodeC.hub.Run()
-	go mgrC.Start(nodeC.ctx)
+	go func() { _ = mgrC.Start(nodeC.ctx) }()
 
 	// Wait for A↔B and B↔C connections
 	deadline = time.Now().Add(10 * time.Second)
@@ -246,7 +246,7 @@ func TestGossipDedup(t *testing.T) {
 	}
 	nodeA.mgr = mgrA
 	go nodeA.hub.Run()
-	go mgrA.Start(nodeA.ctx)
+	go func() { _ = mgrA.Start(nodeA.ctx) }()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for mgrA.Addr() == "" && time.Now().Before(deadline) {
@@ -270,7 +270,7 @@ func TestGossipDedup(t *testing.T) {
 	}
 	nodeB.mgr = mgrB
 	go nodeB.hub.Run()
-	go mgrB.Start(nodeB.ctx)
+	go func() { _ = mgrB.Start(nodeB.ctx) }()
 
 	// Wait for A↔B
 	deadline = time.Now().Add(5 * time.Second)
@@ -297,7 +297,7 @@ func TestGossipDedup(t *testing.T) {
 	}
 	nodeC.mgr = mgrC
 	go nodeC.hub.Run()
-	go mgrC.Start(nodeC.ctx)
+	go func() { _ = mgrC.Start(nodeC.ctx) }()
 
 	// Wait for full mesh
 	deadline = time.Now().Add(10 * time.Second)
@@ -418,7 +418,7 @@ func TestGossipDefaultHopCountChain(t *testing.T) {
 		}
 		nodes[i].mgr = mgr
 		go nodes[i].hub.Run()
-		go mgr.Start(nodes[i].ctx)
+		go func() { _ = mgr.Start(nodes[i].ctx) }()
 
 		deadline := time.Now().Add(5 * time.Second)
 		for mgr.Addr() == "" && time.Now().Before(deadline) {

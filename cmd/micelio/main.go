@@ -76,7 +76,11 @@ func main() {
 		slog.Error("fatal: store", "err", err)
 		os.Exit(1)
 	}
-	defer store.Close()
+	defer func() {
+		if err := store.Close(); err != nil {
+			slog.Error("error closing store", "err", err)
+		}
+	}()
 
 	// Start partyline hub
 	hub := partyline.NewHub(cfg.Node.Name)
