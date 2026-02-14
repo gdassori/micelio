@@ -114,12 +114,14 @@ func (e *Engine) RegisterHandler(msgType uint32, handler MessageHandler) {
 }
 
 // Stats represents aggregate gossip engine statistics.
+// All counters track peer-level operations, not message-level.
+// For example, broadcasting one message to 10 peers increments Broadcast by 10.
 type Stats struct {
-	Received  uint64 // messages received and validated
+	Received  uint64 // unique messages received and validated (after dedup)
 	Delivered uint64 // messages delivered to local handlers
-	Broadcast uint64 // messages broadcast to peers
-	Forwarded uint64 // messages forwarded to peers
-	Dropped   uint64 // messages dropped (buffer full)
+	Broadcast uint64 // successful peer sends during broadcast operations
+	Forwarded uint64 // successful peer sends during forward operations
+	Dropped   uint64 // peer sends dropped due to full buffers
 }
 
 // Stats returns a snapshot of aggregate engine statistics.
