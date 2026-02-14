@@ -43,6 +43,11 @@ type Manager struct {
 	remoteSend chan partyline.RemoteMsg
 	done       chan struct{}
 	closeOnce  sync.Once
+
+	// Peer timeout overrides (0 = use peer defaults). Set before Start().
+	peerIdleTimeout       time.Duration
+	peerKeepaliveInterval time.Duration
+	peerWriteTimeout      time.Duration
 }
 
 // NewManager creates a transport manager.
@@ -199,6 +204,7 @@ func (m *Manager) handleInbound(conn net.Conn) {
 	}
 
 	peer := newPeer(nc, peerX25519, m.id, m.hub, false)
+	m.applyPeerTimeouts(peer)
 	if err := peer.ExchangeHello(m.helloConfig()); err != nil {
 		tlog.Warn("inbound hello failed", "remote", conn.RemoteAddr(), "err", err)
 		nc.Close()
@@ -262,6 +268,7 @@ func (m *Manager) dial(addr string) error {
 	}
 
 	peer := newPeer(nc, peerX25519, m.id, m.hub, true)
+	m.applyPeerTimeouts(peer)
 	if err := peer.ExchangeHello(m.helloConfig()); err != nil {
 		nc.Close()
 		return fmt.Errorf("hello exchange: %w", err)
@@ -395,4 +402,59 @@ func (m *Manager) advertiseAddr() string {
 		return ""
 	}
 	return addr
+}
+
+// SetPeerTimeouts configures the idle timeout and keepalive interval for all
+// subsequently created peers. Must be called before Start().
+//
+// The idle parameter is the read-deadline timeout: if no data arrives within
+// this window, the peer is disconnected. The keepalive parameter is the
+// interval at which keepalive messages are sent on an otherwise idle connection.
+//
+// Passing 0 for either parameter leaves that timeout at the peer's default
+// value. For the keepalive mechanism to be effective, keepalive should be less
+// than idle so that keepalive messages are sent before the connection would be
+// considered idle.
+func (m *Manager) SetPeerTimeouts(idle, keepalive time.Duration) {
+	if idle < 0 {
+		idle = 0
+	}
+	if keepalive < 0 {
+		keepalive = 0
+	}
+	m.mu.Lock()
+	m.peerIdleTimeout = idle
+	m.peerKeepaliveInterval = keepalive
+	m.mu.Unlock()
+}
+
+// SetPeerWriteTimeout sets the write deadline timeout for all current and
+// future peers. Intended for testing write timeout behavior.
+func (m *Manager) SetPeerWriteTimeout(d time.Duration) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.peerWriteTimeout = d
+	for _, p := range m.peers {
+		p.writeTimeout.Store(int64(d))
+	}
+}
+
+// applyPeerTimeouts overrides the peer's default timeouts if the manager
+// has non-zero overrides configured.
+func (m *Manager) applyPeerTimeouts(p *Peer) {
+	m.mu.Lock()
+	idle := m.peerIdleTimeout
+	keepalive := m.peerKeepaliveInterval
+	writeTimeout := m.peerWriteTimeout
+	m.mu.Unlock()
+
+	if idle > 0 {
+		p.idleTimeout = idle
+	}
+	if keepalive > 0 {
+		p.keepaliveInterval = keepalive
+	}
+	if writeTimeout > 0 {
+		p.writeTimeout.Store(int64(writeTimeout))
+	}
 }

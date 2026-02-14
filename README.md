@@ -112,6 +112,10 @@ bootstrap = [
 max_peers = 15
 exchange_interval = "30s"   # peer exchange period
 discovery_interval = "10s"  # discovery scan period
+
+# Connection health (hardcoded defaults, not yet configurable)
+# idle_timeout = "60s"        # disconnect silent peers after this
+# keepalive_interval = "20s"  # send keepalive when no real traffic
 ```
 
 CLI flags take precedence over config file values.
