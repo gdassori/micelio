@@ -64,7 +64,7 @@ func TestSSHPartyline(t *testing.T) {
 		cancel()
 		srv.Stop()
 	}()
-	go srv.Serve(ctx)
+	go func() { _ = srv.Serve(ctx) }()
 
 	// SSH client
 	clientSigner, err := gossh.NewSignerFromKey(clientPriv)
@@ -80,13 +80,13 @@ func TestSSHPartyline(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ssh dial: %v", err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	session, err := client.NewSession()
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
-	defer session.Close()
+	defer func() { _ = session.Close() }()
 
 	if err := session.RequestPty("xterm", 40, 80, gossh.TerminalModes{}); err != nil {
 		t.Fatalf("pty: %v", err)
@@ -164,6 +164,22 @@ func TestSSHPartyline(t *testing.T) {
 	send("/who")
 	waitFor("Online (1): hacker")
 
+	// /help
+	send("/help")
+	waitFor("Commands:")
+	waitFor("/who")
+	waitFor("/nick <name>")
+	waitFor("/quit")
+	waitFor("/help")
+
+	// /nick without args
+	send("/nick")
+	waitFor("Usage: /nick <name>")
+
+	// unknown command
+	send("/bogus")
+	waitFor("Unknown command: /bogus")
+
 	// /quit
 	send("/quit")
 	waitFor("Goodbye")
@@ -182,5 +198,63 @@ func TestSSHPartyline(t *testing.T) {
 	}
 	if capture.Count(slog.LevelError) != 0 {
 		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
+	}
+}
+
+func TestSSHServerStart(t *testing.T) {
+	tmpDir := t.TempDir()
+
+	id, err := identity.Load(tmpDir)
+	if err != nil {
+		t.Fatalf("identity: %v", err)
+	}
+
+	clientPub, _, err := ed25519.GenerateKey(rand.Reader)
+	if err != nil {
+		t.Fatalf("generating client key: %v", err)
+	}
+	sshPub, err := gossh.NewPublicKey(clientPub)
+	if err != nil {
+		t.Fatalf("converting client key: %v", err)
+	}
+	authKeysPath := filepath.Join(tmpDir, "authorized_keys")
+	if err := os.WriteFile(authKeysPath, gossh.MarshalAuthorizedKey(sshPub), 0600); err != nil {
+		t.Fatalf("writing authorized_keys: %v", err)
+	}
+
+	hub := partyline.NewHub("start-test")
+	go hub.Run()
+	defer hub.Stop()
+
+	srv, err := sshserver.NewServer("127.0.0.1:0", id, hub, authKeysPath)
+	if err != nil {
+		t.Fatalf("creating server: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	errCh := make(chan error, 1)
+	go func() {
+		errCh <- srv.Start(ctx)
+	}()
+
+	// Wait for the server to be listening
+	deadline := time.Now().Add(5 * time.Second)
+	for srv.Addr() == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if srv.Addr() == "" {
+		t.Fatal("server did not start listening")
+	}
+
+	cancel()
+	srv.Stop()
+
+	select {
+	case err := <-errCh:
+		if err != nil {
+			t.Errorf("Start returned unexpected error: %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("Start did not return after cancel+stop")
 	}
 }

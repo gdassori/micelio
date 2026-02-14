@@ -137,7 +137,7 @@ func (m *Manager) Stop() {
 		m.gossip.Stop()
 		m.mu.Lock()
 		if m.listener != nil {
-			m.listener.Close()
+			_ = m.listener.Close()
 		}
 		for _, p := range m.peers {
 			p.Close()
@@ -191,7 +191,7 @@ func (m *Manager) handleInbound(conn net.Conn) {
 		m.mu.Unlock()
 		if atCapacity {
 			tlog.Info("rejecting inbound: at capacity", "remote", conn.RemoteAddr())
-			conn.Close()
+			_ = conn.Close()
 			return
 		}
 	}
@@ -199,7 +199,7 @@ func (m *Manager) handleInbound(conn net.Conn) {
 	nc, peerX25519, err := Handshake(conn, false, m.noiseKey)
 	if err != nil {
 		tlog.Warn("inbound handshake failed", "remote", conn.RemoteAddr(), "err", err)
-		conn.Close()
+		_ = conn.Close()
 		return
 	}
 
@@ -207,13 +207,13 @@ func (m *Manager) handleInbound(conn net.Conn) {
 	m.applyPeerTimeouts(peer)
 	if err := peer.ExchangeHello(m.helloConfig()); err != nil {
 		tlog.Warn("inbound hello failed", "remote", conn.RemoteAddr(), "err", err)
-		nc.Close()
+		_ = nc.Close()
 		return
 	}
 
 	if reason := m.addPeer(peer); reason != "" {
 		tlog.Info("rejecting inbound peer", "peer", peer.NodeID, "reason", reason)
-		nc.Close()
+		_ = nc.Close()
 		return
 	}
 
@@ -263,19 +263,19 @@ func (m *Manager) dial(addr string) error {
 
 	nc, peerX25519, err := Handshake(conn, true, m.noiseKey)
 	if err != nil {
-		conn.Close()
+		_ = conn.Close()
 		return fmt.Errorf("noise handshake: %w", err)
 	}
 
 	peer := newPeer(nc, peerX25519, m.id, m.hub, true)
 	m.applyPeerTimeouts(peer)
 	if err := peer.ExchangeHello(m.helloConfig()); err != nil {
-		nc.Close()
+		_ = nc.Close()
 		return fmt.Errorf("hello exchange: %w", err)
 	}
 
 	if reason := m.addPeer(peer); reason != "" {
-		nc.Close()
+		_ = nc.Close()
 		return fmt.Errorf("peer %s rejected: %s", peer.NodeID, reason)
 	}
 

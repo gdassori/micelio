@@ -58,31 +58,43 @@ func NewServer(addr string, id *identity.Identity, hub *partyline.Hub, authKeysP
 
 // Listen binds the server socket. Call Serve to start accepting connections.
 func (s *Server) Listen() error {
-	var err error
-	s.listener, err = net.Listen("tcp", s.addr)
+	ln, err := net.Listen("tcp", s.addr)
 	if err != nil {
 		return fmt.Errorf("listening on %s: %w", s.addr, err)
 	}
+	s.mu.Lock()
+	s.listener = ln
+	s.mu.Unlock()
 	return nil
 }
 
 // Addr returns the listener's address. Useful when listening on :0.
 func (s *Server) Addr() string {
-	if s.listener == nil {
+	s.mu.Lock()
+	ln := s.listener
+	s.mu.Unlock()
+	if ln == nil {
 		return ""
 	}
-	return s.listener.Addr().String()
+	return ln.Addr().String()
 }
 
 // Serve accepts SSH connections until ctx is cancelled. Call Listen first.
 func (s *Server) Serve(ctx context.Context) error {
+	s.mu.Lock()
+	ln := s.listener
+	s.mu.Unlock()
+	if ln == nil {
+		return fmt.Errorf("Serve called before Listen")
+	}
+
 	go func() {
 		<-ctx.Done()
-		s.listener.Close()
+		_ = ln.Close()
 	}()
 
 	for {
-		conn, err := s.listener.Accept()
+		conn, err := ln.Accept()
 		if err != nil {
 			if ctx.Err() != nil {
 				return nil // clean shutdown
@@ -109,13 +121,13 @@ func (s *Server) Start(ctx context.Context) error {
 
 // Stop closes the listener and all active connections.
 func (s *Server) Stop() {
-	if s.listener != nil {
-		s.listener.Close()
-	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	if s.listener != nil {
+		_ = s.listener.Close()
+	}
 	for conn := range s.conns {
-		conn.Close()
+		_ = conn.Close()
 	}
 }
 
@@ -136,7 +148,7 @@ func (s *Server) publicKeyCallback(meta gossh.ConnMetadata, key gossh.PublicKey)
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
-	defer conn.Close()
+	defer func() { _ = conn.Close() }()
 	defer s.removeConn(conn)
 
 	sshConn, chans, reqs, err := gossh.NewServerConn(conn, s.config)
@@ -144,14 +156,14 @@ func (s *Server) handleConnection(conn net.Conn) {
 		sshlog.Warn("handshake failed", "remote", conn.RemoteAddr(), "err", err)
 		return
 	}
-	defer sshConn.Close()
+	defer func() { _ = sshConn.Close() }()
 
 	sshlog.Info("client connected", "remote", conn.RemoteAddr(), "user", sshConn.User())
 	go gossh.DiscardRequests(reqs)
 
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
-			newChan.Reject(gossh.UnknownChannelType, "unsupported channel type")
+			_ = newChan.Reject(gossh.UnknownChannelType, "unsupported channel type")
 			continue
 		}
 		channel, requests, err := newChan.Accept()
@@ -164,7 +176,7 @@ func (s *Server) handleConnection(conn net.Conn) {
 }
 
 func (s *Server) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request, conn *gossh.ServerConn) {
-	defer ch.Close()
+	defer func() { _ = ch.Close() }()
 
 	// Wait for pty-req and shell before starting the terminal.
 	// Drain other requests in the background once shell is received.
@@ -172,16 +184,16 @@ func (s *Server) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request, con
 		switch req.Type {
 		case "pty-req":
 			if req.WantReply {
-				req.Reply(true, nil)
+				_ = req.Reply(true, nil)
 			}
 		case "shell":
 			if req.WantReply {
-				req.Reply(true, nil)
+				_ = req.Reply(true, nil)
 			}
 			go func() {
 				for req := range reqs {
 					if req.WantReply {
-						req.Reply(false, nil)
+						_ = req.Reply(false, nil)
 					}
 				}
 			}()
@@ -189,7 +201,7 @@ func (s *Server) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request, con
 			return
 		default:
 			if req.WantReply {
-				req.Reply(false, nil)
+				_ = req.Reply(false, nil)
 			}
 		}
 	}
@@ -206,13 +218,13 @@ func (s *Server) runTerminal(ch gossh.Channel, conn *gossh.ServerConn) {
 	go func() {
 		defer close(done)
 		for msg := range session.Send {
-			fmt.Fprintln(terminal, msg)
+			_, _ = fmt.Fprintln(terminal, msg)
 		}
 	}()
 
-	fmt.Fprintf(terminal, "Welcome to %s partyline!\r\n", s.hub.NodeName())
-	fmt.Fprintln(terminal, "Type /help for commands.")
-	fmt.Fprintln(terminal, "")
+	_, _ = fmt.Fprintf(terminal, "Welcome to %s partyline!\r\n", s.hub.NodeName())
+	_, _ = fmt.Fprintln(terminal, "Type /help for commands.")
+	_, _ = fmt.Fprintln(terminal, "")
 
 	// Read loop: terminal → hub
 	for {
@@ -244,17 +256,17 @@ func (s *Server) handleCommand(line string, session *partyline.Session, terminal
 
 	switch cmd {
 	case "/quit":
-		fmt.Fprintln(terminal, "Goodbye.")
+		_, _ = fmt.Fprintln(terminal, "Goodbye.")
 		s.hub.Leave(session)
 		return true
 
 	case "/who":
 		nicks := s.hub.Who()
-		fmt.Fprintf(terminal, "Online (%d): %s\r\n", len(nicks), strings.Join(nicks, ", "))
+		_, _ = fmt.Fprintf(terminal, "Online (%d): %s\r\n", len(nicks), strings.Join(nicks, ", "))
 
 	case "/nick":
 		if len(args) == 0 {
-			fmt.Fprintln(terminal, "Usage: /nick <name>")
+			_, _ = fmt.Fprintln(terminal, "Usage: /nick <name>")
 			return false
 		}
 		newNick := args[0]
@@ -262,14 +274,14 @@ func (s *Server) handleCommand(line string, session *partyline.Session, terminal
 		terminal.SetPrompt(fmt.Sprintf("[%s]> ", newNick))
 
 	case "/help":
-		fmt.Fprintln(terminal, "Commands:")
-		fmt.Fprintln(terminal, "  /who          — list online users")
-		fmt.Fprintln(terminal, "  /nick <name>  — change your nickname")
-		fmt.Fprintln(terminal, "  /quit         — disconnect")
-		fmt.Fprintln(terminal, "  /help         — show this help")
+		_, _ = fmt.Fprintln(terminal, "Commands:")
+		_, _ = fmt.Fprintln(terminal, "  /who          — list online users")
+		_, _ = fmt.Fprintln(terminal, "  /nick <name>  — change your nickname")
+		_, _ = fmt.Fprintln(terminal, "  /quit         — disconnect")
+		_, _ = fmt.Fprintln(terminal, "  /help         — show this help")
 
 	default:
-		fmt.Fprintf(terminal, "Unknown command: %s (try /help)\r\n", cmd)
+		_, _ = fmt.Fprintf(terminal, "Unknown command: %s (try /help)\r\n", cmd)
 	}
 
 	return false

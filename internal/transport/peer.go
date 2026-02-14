@@ -173,7 +173,7 @@ func (p *Peer) SendRaw(data []byte) bool {
 func (p *Peer) Close() {
 	p.closeOnce.Do(func() {
 		close(p.done)
-		p.conn.Close()
+		_ = p.conn.Close()
 	})
 }
 

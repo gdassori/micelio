@@ -54,7 +54,7 @@ func setupTestPair(t *testing.T, idleA, kaA, idleB, kaB time.Duration) *testPair
 	mgrB.SetPeerTimeouts(idleB, kaB)
 
 	ctxB, cancelB := context.WithCancel(context.Background())
-	go mgrB.Start(ctxB)
+	go func() { _ = mgrB.Start(ctxB) }()
 
 	deadline := time.Now().Add(5 * time.Second)
 	for mgrB.Addr() == "" && time.Now().Before(deadline) {
@@ -80,7 +80,7 @@ func setupTestPair(t *testing.T, idleA, kaA, idleB, kaB time.Duration) *testPair
 	mgrA.SetPeerTimeouts(idleA, kaA)
 
 	ctxA, cancelA := context.WithCancel(context.Background())
-	go mgrA.Start(ctxA)
+	go func() { _ = mgrA.Start(ctxA) }()
 
 	// Wait for connection.
 	deadline = time.Now().Add(5 * time.Second)

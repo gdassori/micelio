@@ -366,32 +366,6 @@ func TestSafeLastSeenBoundary(t *testing.T) {
 	}
 }
 
-// --- makeTestManagerWithStore creates a Manager backed by a real bolt store ---
-
-func makeTestManagerWithStore(t *testing.T) *Manager {
-	t.Helper()
-	dir := t.TempDir()
-	id, err := identity.Load(dir)
-	if err != nil {
-		t.Fatalf("identity: %v", err)
-	}
-	hub := partyline.NewHub("test")
-	st, err := boltstore.Open(filepath.Join(dir, "test.db"))
-	if err != nil {
-		t.Fatalf("open store: %v", err)
-	}
-	t.Cleanup(func() { st.Close() })
-	cfg := &config.Config{
-		Node:    config.NodeConfig{Name: "test"},
-		Network: config.NetworkConfig{},
-	}
-	mgr, err := NewManager(cfg, id, hub, st)
-	if err != nil {
-		t.Fatalf("manager: %v", err)
-	}
-	return mgr
-}
-
 // --- saveKnownPeer + loadKnownPeers round-trip ---
 
 func TestSaveAndLoadKnownPeers(t *testing.T) {
@@ -440,13 +414,15 @@ func TestSaveAndLoadKnownPeers(t *testing.T) {
 	mgr.saveKnownPeer(rec)
 
 	// Close the store, reopen, and create a new manager to test loadKnownPeers
-	st.Close()
+	if err := st.Close(); err != nil {
+		t.Fatalf("close store: %v", err)
+	}
 
 	st2, err := boltstore.Open(filepath.Join(dir, "test.db"))
 	if err != nil {
 		t.Fatalf("reopen store: %v", err)
 	}
-	defer st2.Close()
+	defer func() { _ = st2.Close() }()
 
 	mgr2, err := NewManager(cfg, id, hub, st2)
 	if err != nil {
@@ -496,28 +472,34 @@ func TestLoadKnownPeersSkipsInvalidRecords(t *testing.T) {
 	if err != nil {
 		t.Fatalf("open store: %v", err)
 	}
-	defer st.Close()
+	defer func() { _ = st.Close() }()
 
 	// Manually insert invalid records into the store
+	mustSet := func(key string, val []byte) {
+		t.Helper()
+		if err := st.Set(peersBucket, []byte(key), val); err != nil {
+			t.Fatalf("set %s: %v", key, err)
+		}
+	}
 
 	// 1. Invalid JSON
-	st.Set(peersBucket, []byte("bad-json"), []byte("not-json{"))
+	mustSet("bad-json", []byte("not-json{"))
 
 	// 2. Empty NodeID
 	emptyID, _ := json.Marshal(PeerRecord{Addr: "1.2.3.4:5000"})
-	st.Set(peersBucket, []byte("empty-id"), emptyID)
+	mustSet("empty-id", emptyID)
 
 	// 3. Invalid addr (wildcard)
 	wildcard, _ := json.Marshal(PeerRecord{NodeID: "abc123", Addr: "0.0.0.0:4000"})
-	st.Set(peersBucket, []byte("wildcard"), wildcard)
+	mustSet("wildcard", wildcard)
 
 	// 4. Invalid pubkey (bad hex)
 	badHex, _ := json.Marshal(PeerRecord{NodeID: "abc123", Addr: "10.0.0.1:4000", PublicKey: "not-hex!!"})
-	st.Set(peersBucket, []byte("bad-hex"), badHex)
+	mustSet("bad-hex", badHex)
 
 	// 5. Invalid pubkey (wrong length)
 	shortKey, _ := json.Marshal(PeerRecord{NodeID: "abc123", Addr: "10.0.0.1:4000", PublicKey: hex.EncodeToString([]byte("short"))})
-	st.Set(peersBucket, []byte("short-key"), shortKey)
+	mustSet("short-key", shortKey)
 
 	// 6. Pubkey hash doesn't match NodeID
 	pub, _, _ := ed25519.GenerateKey(rand.Reader)
@@ -526,11 +508,11 @@ func TestLoadKnownPeersSkipsInvalidRecords(t *testing.T) {
 		Addr:      "10.0.0.1:4000",
 		PublicKey: hex.EncodeToString(pub),
 	})
-	st.Set(peersBucket, []byte("mismatch"), mismatch)
+	mustSet("mismatch", mismatch)
 
 	// 7. Valid record (no pubkey, just addr — should be accepted)
 	validNoPub, _ := json.Marshal(PeerRecord{NodeID: "valid-no-pub", Addr: "10.0.0.2:4000"})
-	st.Set(peersBucket, []byte("valid-no-pub"), validNoPub)
+	mustSet("valid-no-pub", validNoPub)
 
 	cfg := &config.Config{
 		Node:    config.NodeConfig{Name: "test"},

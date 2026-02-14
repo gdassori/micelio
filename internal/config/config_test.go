@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 func TestDefaults(t *testing.T) {
@@ -22,12 +23,18 @@ func TestDefaults(t *testing.T) {
 	}
 }
 
+func loadCfg(t *testing.T, path string) *Config {
+	t.Helper()
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatalf("Load(%q): %v", path, err)
+	}
+	return cfg
+}
+
 func TestLoadNoFile(t *testing.T) {
 	// Load with empty path and no default config file → returns defaults
-	cfg, err := Load("")
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	cfg := loadCfg(t, "")
 	if cfg.SSH.Listen != "0.0.0.0:2222" {
 		t.Errorf("SSH listen: got %q, want 0.0.0.0:2222", cfg.SSH.Listen)
 	}
@@ -54,10 +61,7 @@ max_peers = 10
 		t.Fatal(err)
 	}
 
-	cfg, err := Load(path)
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
+	cfg := loadCfg(t, path)
 
 	if cfg.Node.Name != "test-node" {
 		t.Errorf("Node.Name: got %q, want test-node", cfg.Node.Name)
@@ -106,5 +110,67 @@ func TestExpandHome(t *testing.T) {
 	// Non-home path unchanged
 	if got := ExpandHome("/absolute/path"); got != "/absolute/path" {
 		t.Errorf("ExpandHome: got %q, want /absolute/path", got)
+	}
+}
+
+func TestDurationUnmarshalText(t *testing.T) {
+	tests := []struct {
+		input string
+		want  time.Duration
+		err   bool
+	}{
+		{"30s", 30 * time.Second, false},
+		{"5m", 5 * time.Minute, false},
+		{"1h", time.Hour, false},
+		{"100ms", 100 * time.Millisecond, false},
+		{"invalid", 0, true},
+		{"", 0, true},
+	}
+	for _, tt := range tests {
+		var d Duration
+		err := d.UnmarshalText([]byte(tt.input))
+		if tt.err {
+			if err == nil {
+				t.Errorf("UnmarshalText(%q): expected error", tt.input)
+			}
+			continue
+		}
+		if err != nil {
+			t.Errorf("UnmarshalText(%q): %v", tt.input, err)
+			continue
+		}
+		if d.Duration != tt.want {
+			t.Errorf("UnmarshalText(%q): got %v, want %v", tt.input, d.Duration, tt.want)
+		}
+	}
+}
+
+func TestLoadTOMLWithDurations(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "config.toml")
+	content := `
+[network]
+exchange_interval = "45s"
+discovery_interval = "15s"
+`
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := loadCfg(t, path)
+
+	if cfg.Network.ExchangeInterval.Duration != 45*time.Second {
+		t.Errorf("ExchangeInterval: got %v, want 45s", cfg.Network.ExchangeInterval.Duration)
+	}
+	if cfg.Network.DiscoveryInterval.Duration != 15*time.Second {
+		t.Errorf("DiscoveryInterval: got %v, want 15s", cfg.Network.DiscoveryInterval.Duration)
+	}
+}
+
+func TestLoadNonexistentFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "nonexistent.toml")
+	_, err := Load(path)
+	if err == nil {
+		t.Fatal("expected error for nonexistent file")
 	}
 }
