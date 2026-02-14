@@ -1,7 +1,9 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -100,6 +102,123 @@ func Load(path string) (*Config, error) {
 	}
 
 	return cfg, nil
+}
+
+// Validate checks configured addresses, numeric fields, and logging level for validity.
+// Returns all validation errors as a joined error (not just the first).
+func (c *Config) Validate() error {
+	var errs []error
+	errs = append(errs, c.validateAddresses()...)
+	errs = append(errs, c.validateNumericFields()...)
+	if err := validateLogLevel(c.Logging.Level); err != nil {
+		errs = append(errs, fmt.Errorf("logging.level: %w", err))
+	}
+	if len(errs) > 0 {
+		return errors.Join(errs...)
+	}
+	return nil
+}
+
+// validateAddresses validates all network and SSH address fields.
+func (c *Config) validateAddresses() []error {
+	var errs []error
+	if c.Network.Listen != "" {
+		if err := validateListenAddr(c.Network.Listen); err != nil {
+			errs = append(errs, fmt.Errorf("network.listen: %w", err))
+		}
+	}
+	if c.SSH.Listen != "" {
+		if err := validateListenAddr(c.SSH.Listen); err != nil {
+			errs = append(errs, fmt.Errorf("ssh.listen: %w", err))
+		}
+	}
+	for i, addr := range c.Network.Bootstrap {
+		if err := validatePeerAddr(addr); err != nil {
+			errs = append(errs, fmt.Errorf("network.bootstrap[%d]: %w", i, err))
+		}
+	}
+	if c.Network.AdvertiseAddr != "" {
+		if err := validatePeerAddr(c.Network.AdvertiseAddr); err != nil {
+			errs = append(errs, fmt.Errorf("network.advertise_addr: %w", err))
+		}
+	}
+	return errs
+}
+
+// validateNumericFields validates all numeric config fields.
+func (c *Config) validateNumericFields() []error {
+	var errs []error
+	if c.Network.MaxPeers < 0 {
+		errs = append(errs, fmt.Errorf("network.max_peers: must be >= 0, got %d", c.Network.MaxPeers))
+	}
+	if c.Network.ExchangeInterval.Duration < 0 {
+		errs = append(errs, fmt.Errorf("network.exchange_interval: must be >= 0, got %s", c.Network.ExchangeInterval))
+	}
+	if c.Network.DiscoveryInterval.Duration < 0 {
+		errs = append(errs, fmt.Errorf("network.discovery_interval: must be >= 0, got %s", c.Network.DiscoveryInterval))
+	}
+	return errs
+}
+
+// validateListenAddr validates a listen address (host:port).
+// Accepts wildcard hosts (0.0.0.0, ::).
+func validateListenAddr(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return fmt.Errorf("address is empty")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid format (expected host:port): %w", err)
+	}
+	if port == "" {
+		return fmt.Errorf("missing port")
+	}
+	// Listen addresses can be wildcards, so we only reject empty host
+	if host == "" {
+		return fmt.Errorf("missing host")
+	}
+	return nil
+}
+
+// validatePeerAddr validates a peer address (host:port).
+// Rejects wildcard/unspecified hosts as they're not dialable.
+func validatePeerAddr(addr string) error {
+	addr = strings.TrimSpace(addr)
+	if addr == "" {
+		return fmt.Errorf("address is empty")
+	}
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		return fmt.Errorf("invalid format (expected host:port): %w", err)
+	}
+	if port == "" {
+		return fmt.Errorf("missing port")
+	}
+	if host == "" {
+		return fmt.Errorf("wildcard host not allowed for peer address")
+	}
+	// Reject unspecified IP addresses (0.0.0.0, ::, and all variants)
+	if ip := net.ParseIP(host); ip != nil && ip.IsUnspecified() {
+		return fmt.Errorf("wildcard host not allowed for peer address")
+	}
+	return nil
+}
+
+// validateLogLevel validates a log level string.
+// Accepts: debug, info, warn, warning, error (case-insensitive), and empty string.
+// Empty string defaults to "info" in logging.Init().
+func validateLogLevel(level string) error {
+	normalized := strings.ToLower(strings.TrimSpace(level))
+	if normalized == "" {
+		return nil // empty is valid, defaults to info
+	}
+	switch normalized {
+	case "debug", "info", "warn", "warning", "error":
+		return nil
+	default:
+		return fmt.Errorf("invalid level %q (expected: debug, info, warn, warning, error)", level)
+	}
 }
 
 // ExpandHome resolves a leading ~/ to the user's home directory.
