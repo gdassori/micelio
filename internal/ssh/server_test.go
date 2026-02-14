@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/ed25519"
 	"crypto/rand"
+	"io"
 	"log/slog"
 	"os"
 	"path/filepath"
@@ -20,74 +21,75 @@ import (
 	gossh "golang.org/x/crypto/ssh"
 )
 
-func TestSSHPartyline(t *testing.T) {
-	capture := logging.CaptureForTest()
-	defer capture.Restore()
+// testServer bundles a running SSH server with a client signer for tests.
+type testServer struct {
+	Srv          *sshserver.Server
+	Hub          *partyline.Hub
+	ClientSigner gossh.Signer
+}
+
+// newTestServer creates an identity, client key, authorized_keys, hub, and SSH
+// server ready for use. The hub is started and cleanup is registered via t.Cleanup.
+func newTestServer(t *testing.T, hubName string) *testServer {
+	t.Helper()
 
 	tmpDir := t.TempDir()
-
-	// Server identity
 	id, err := identity.Load(tmpDir)
 	if err != nil {
 		t.Fatalf("identity: %v", err)
 	}
 
-	// Client key → authorized_keys
-	clientPub, clientPriv, err := ed25519.GenerateKey(rand.Reader)
+	_, clientPriv, err := ed25519.GenerateKey(rand.Reader)
 	if err != nil {
-		t.Fatalf("generating client key: %v", err)
+		t.Fatalf("client key: %v", err)
 	}
-	sshPub, err := gossh.NewPublicKey(clientPub)
+	sshPub, err := gossh.NewPublicKey(clientPriv.Public())
 	if err != nil {
-		t.Fatalf("converting client key: %v", err)
+		t.Fatalf("ssh public key: %v", err)
 	}
 	authKeysPath := filepath.Join(tmpDir, "authorized_keys")
 	if err := os.WriteFile(authKeysPath, gossh.MarshalAuthorizedKey(sshPub), 0600); err != nil {
-		t.Fatalf("writing authorized_keys: %v", err)
+		t.Fatalf("authorized_keys: %v", err)
 	}
-
-	// Hub
-	hub := partyline.NewHub("test-node")
-	go hub.Run()
-	defer hub.Stop()
-
-	// Server on random port
-	srv, err := sshserver.NewServer("127.0.0.1:0", id, hub, authKeysPath)
-	if err != nil {
-		t.Fatalf("creating server: %v", err)
-	}
-	if err := srv.Listen(); err != nil {
-		t.Fatalf("listen: %v", err)
-	}
-	ctx, cancel := context.WithCancel(context.Background())
-	defer func() {
-		cancel()
-		srv.Stop()
-	}()
-	go func() { _ = srv.Serve(ctx) }()
-
-	// SSH client
 	clientSigner, err := gossh.NewSignerFromKey(clientPriv)
 	if err != nil {
 		t.Fatalf("client signer: %v", err)
 	}
-	client, err := gossh.Dial("tcp", srv.Addr(), &gossh.ClientConfig{
-		User:            "tester",
-		Auth:            []gossh.AuthMethod{gossh.PublicKeys(clientSigner)},
+
+	hub := partyline.NewHub(hubName)
+	go hub.Run()
+	t.Cleanup(hub.Stop)
+
+	srv, err := sshserver.NewServer("127.0.0.1:0", id, hub, authKeysPath)
+	if err != nil {
+		t.Fatalf("creating server: %v", err)
+	}
+
+	return &testServer{Srv: srv, Hub: hub, ClientSigner: clientSigner}
+}
+
+// dialClient connects an SSH client to the server and returns the client.
+func (ts *testServer) dialClient(t *testing.T, user string) *gossh.Client {
+	t.Helper()
+	client, err := gossh.Dial("tcp", ts.Srv.Addr(), &gossh.ClientConfig{
+		User:            user,
+		Auth:            []gossh.AuthMethod{gossh.PublicKeys(ts.ClientSigner)},
 		HostKeyCallback: gossh.InsecureIgnoreHostKey(),
 		Timeout:         5 * time.Second,
 	})
 	if err != nil {
 		t.Fatalf("ssh dial: %v", err)
 	}
-	defer func() { _ = client.Close() }()
+	return client
+}
 
+// openShell opens a pty+shell session and returns the session, stdin, and stdout.
+func (ts *testServer) openShell(t *testing.T, client *gossh.Client) (*gossh.Session, io.WriteCloser, io.Reader) {
+	t.Helper()
 	session, err := client.NewSession()
 	if err != nil {
 		t.Fatalf("new session: %v", err)
 	}
-	defer func() { _ = session.Close() }()
-
 	if err := session.RequestPty("xterm", 40, 80, gossh.TerminalModes{}); err != nil {
 		t.Fatalf("pty: %v", err)
 	}
@@ -102,46 +104,76 @@ func TestSSHPartyline(t *testing.T) {
 	if err := session.Shell(); err != nil {
 		t.Fatalf("shell: %v", err)
 	}
+	return session, stdin, stdout
+}
 
-	// Accumulate output in background
-	var mu sync.Mutex
-	var buf strings.Builder
+// outputAccumulator reads from r in the background and provides waitFor.
+type outputAccumulator struct {
+	mu  sync.Mutex
+	buf strings.Builder
+	pos int
+}
+
+func newOutputAccumulator(r io.Reader) *outputAccumulator {
+	a := &outputAccumulator{}
 	go func() {
 		tmp := make([]byte, 4096)
 		for {
-			n, err := stdout.Read(tmp)
+			n, err := r.Read(tmp)
 			if n > 0 {
-				mu.Lock()
-				buf.Write(tmp[:n])
-				mu.Unlock()
+				a.mu.Lock()
+				a.buf.Write(tmp[:n])
+				a.mu.Unlock()
 			}
 			if err != nil {
 				return
 			}
 		}
 	}()
+	return a
+}
 
-	// pos tracks where we last matched, so each waitFor only looks at new output
-	pos := 0
-
-	waitFor := func(substr string) {
-		t.Helper()
-		deadline := time.Now().Add(5 * time.Second)
-		for time.Now().Before(deadline) {
-			mu.Lock()
-			got := buf.String()
-			mu.Unlock()
-			if idx := strings.Index(got[pos:], substr); idx >= 0 {
-				pos += idx + len(substr)
-				return
-			}
-			time.Sleep(50 * time.Millisecond)
+func (a *outputAccumulator) waitFor(t *testing.T, substr string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		a.mu.Lock()
+		got := a.buf.String()
+		a.mu.Unlock()
+		if idx := strings.Index(got[a.pos:], substr); idx >= 0 {
+			a.pos += idx + len(substr)
+			return
 		}
-		mu.Lock()
-		got := buf.String()
-		mu.Unlock()
-		t.Fatalf("timeout waiting for %q in output:\n%s", substr, got[pos:])
+		time.Sleep(50 * time.Millisecond)
 	}
+	a.mu.Lock()
+	got := a.buf.String()
+	a.mu.Unlock()
+	t.Fatalf("timeout waiting for %q in output:\n%s", substr, got[a.pos:])
+}
+
+func TestSSHPartyline(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
+	ts := newTestServer(t, "test-node")
+	if err := ts.Srv.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer func() {
+		cancel()
+		ts.Srv.Stop()
+	}()
+	go func() { _ = ts.Srv.Serve(ctx) }()
+
+	client := ts.dialClient(t, "tester")
+	defer func() { _ = client.Close() }()
+
+	session, stdin, stdout := ts.openShell(t, client)
+	defer func() { _ = session.Close() }()
+
+	out := newOutputAccumulator(stdout)
 
 	send := func(cmd string) {
 		if _, err := stdin.Write([]byte(cmd + "\r")); err != nil {
@@ -150,39 +182,39 @@ func TestSSHPartyline(t *testing.T) {
 	}
 
 	// Welcome
-	waitFor("Welcome to test-node partyline!")
+	out.waitFor(t, "Welcome to test-node partyline!")
 
 	// /who — should list "tester"
 	send("/who")
-	waitFor("Online (1): tester")
+	out.waitFor(t, "Online (1): tester")
 
 	// /nick — change nick and verify
 	send("/nick hacker")
-	waitFor("now known as hacker")
+	out.waitFor(t, "now known as hacker")
 
 	// /who again — should show new nick
 	send("/who")
-	waitFor("Online (1): hacker")
+	out.waitFor(t, "Online (1): hacker")
 
 	// /help
 	send("/help")
-	waitFor("Commands:")
-	waitFor("/who")
-	waitFor("/nick <name>")
-	waitFor("/quit")
-	waitFor("/help")
+	out.waitFor(t, "Commands:")
+	out.waitFor(t, "/who")
+	out.waitFor(t, "/nick <name>")
+	out.waitFor(t, "/quit")
+	out.waitFor(t, "/help")
 
 	// /nick without args
 	send("/nick")
-	waitFor("Usage: /nick <name>")
+	out.waitFor(t, "Usage: /nick <name>")
 
 	// unknown command
 	send("/bogus")
-	waitFor("Unknown command: /bogus")
+	out.waitFor(t, "Unknown command: /bogus")
 
 	// /quit
 	send("/quit")
-	waitFor("Goodbye")
+	out.waitFor(t, "Goodbye")
 
 	time.Sleep(100 * time.Millisecond) // let server process disconnect
 
@@ -202,52 +234,25 @@ func TestSSHPartyline(t *testing.T) {
 }
 
 func TestSSHServerStart(t *testing.T) {
-	tmpDir := t.TempDir()
-
-	id, err := identity.Load(tmpDir)
-	if err != nil {
-		t.Fatalf("identity: %v", err)
-	}
-
-	clientPub, _, err := ed25519.GenerateKey(rand.Reader)
-	if err != nil {
-		t.Fatalf("generating client key: %v", err)
-	}
-	sshPub, err := gossh.NewPublicKey(clientPub)
-	if err != nil {
-		t.Fatalf("converting client key: %v", err)
-	}
-	authKeysPath := filepath.Join(tmpDir, "authorized_keys")
-	if err := os.WriteFile(authKeysPath, gossh.MarshalAuthorizedKey(sshPub), 0600); err != nil {
-		t.Fatalf("writing authorized_keys: %v", err)
-	}
-
-	hub := partyline.NewHub("start-test")
-	go hub.Run()
-	defer hub.Stop()
-
-	srv, err := sshserver.NewServer("127.0.0.1:0", id, hub, authKeysPath)
-	if err != nil {
-		t.Fatalf("creating server: %v", err)
-	}
+	ts := newTestServer(t, "start-test")
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errCh := make(chan error, 1)
 	go func() {
-		errCh <- srv.Start(ctx)
+		errCh <- ts.Srv.Start(ctx)
 	}()
 
 	// Wait for the server to be listening
 	deadline := time.Now().Add(5 * time.Second)
-	for srv.Addr() == "" && time.Now().Before(deadline) {
+	for ts.Srv.Addr() == "" && time.Now().Before(deadline) {
 		time.Sleep(10 * time.Millisecond)
 	}
-	if srv.Addr() == "" {
+	if ts.Srv.Addr() == "" {
 		t.Fatal("server did not start listening")
 	}
 
 	cancel()
-	srv.Stop()
+	ts.Srv.Stop()
 
 	select {
 	case err := <-errCh:
@@ -256,6 +261,50 @@ func TestSSHServerStart(t *testing.T) {
 		}
 	case <-time.After(5 * time.Second):
 		t.Fatal("Start did not return after cancel+stop")
+	}
+}
+
+func TestSSHStopDrainsConnections(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
+	ts := newTestServer(t, "drain-test")
+	if err := ts.Srv.Listen(); err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	go func() { _ = ts.Srv.Serve(ctx) }()
+
+	client := ts.dialClient(t, "drainer")
+	_, _, stdoutR := ts.openShell(t, client)
+	out := newOutputAccumulator(stdoutR)
+	out.waitFor(t, "Welcome")
+
+	// Shut down: cancel context + Stop()
+	cancel()
+
+	stopDone := make(chan struct{})
+	go func() {
+		ts.Srv.Stop()
+		close(stopDone)
+	}()
+
+	select {
+	case <-stopDone:
+		// Good: Stop() completed, meaning it waited for connections to drain
+	case <-time.After(10 * time.Second):
+		t.Fatal("Stop() did not return within timeout")
+	}
+
+	// Log assertions
+	if !capture.Has(slog.LevelInfo, "client connected") {
+		t.Error("expected INFO log: client connected")
+	}
+	if capture.Has(slog.LevelWarn, "timeout waiting for SSH connections to drain") {
+		t.Error("Stop() timed out instead of draining cleanly")
+	}
+	if capture.Count(slog.LevelError) != 0 {
+		t.Errorf("unexpected ERROR logs: %d", capture.Count(slog.LevelError))
 	}
 }
 

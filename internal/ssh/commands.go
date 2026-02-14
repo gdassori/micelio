@@ -19,7 +19,8 @@ type CommandContext struct {
 }
 
 // CommandHandler processes a partyline command. Returns true if the session
-// should be closed (e.g., /quit).
+// should be closed (e.g., /quit). The caller (runTerminal) is responsible
+// for calling hub.Leave; handlers must NOT call it directly.
 type CommandHandler func(ctx CommandContext) bool
 
 // Command describes a registered partyline command.
@@ -156,7 +157,6 @@ func (r *CommandRegistry) RegisterBuiltins() {
 		Help: "disconnect",
 		Handler: func(ctx CommandContext) bool {
 			_, _ = fmt.Fprintln(ctx.Terminal, "Goodbye.")
-			ctx.Hub.Leave(ctx.Session)
 			return true
 		},
 	})

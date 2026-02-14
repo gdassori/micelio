@@ -8,6 +8,7 @@ import (
 	"os"
 	"strings"
 	"sync"
+	"time"
 
 	"micelio/internal/identity"
 	"micelio/internal/logging"
@@ -29,8 +30,11 @@ type Server struct {
 	config   *gossh.ServerConfig
 	listener net.Listener
 
-	mu    sync.Mutex
-	conns map[net.Conn]struct{}
+	mu       sync.Mutex
+	conns    map[net.Conn]struct{}
+	stopping bool
+	wg       sync.WaitGroup
+	stopOnce sync.Once
 }
 
 // NewServer creates an SSH server. authKeysPath points to an authorized_keys
@@ -115,6 +119,12 @@ func (s *Server) Serve(ctx context.Context) error {
 		}
 
 		s.mu.Lock()
+		if s.stopping {
+			s.mu.Unlock()
+			_ = conn.Close()
+			return nil
+		}
+		s.wg.Add(1)
 		s.conns[conn] = struct{}{}
 		s.mu.Unlock()
 
@@ -130,16 +140,31 @@ func (s *Server) Start(ctx context.Context) error {
 	return s.Serve(ctx)
 }
 
-// Stop closes the listener and all active connections.
+// Stop closes the listener and all active connections, then waits for
+// connection goroutines to finish (with a timeout).
 func (s *Server) Stop() {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	if s.listener != nil {
-		_ = s.listener.Close()
-	}
-	for conn := range s.conns {
-		_ = conn.Close()
-	}
+	s.stopOnce.Do(func() {
+		s.mu.Lock()
+		s.stopping = true
+		if s.listener != nil {
+			_ = s.listener.Close()
+		}
+		for conn := range s.conns {
+			_ = conn.Close()
+		}
+		s.mu.Unlock()
+
+		done := make(chan struct{})
+		go func() {
+			s.wg.Wait()
+			close(done)
+		}()
+		select {
+		case <-done:
+		case <-time.After(5 * time.Second):
+			sshlog.Warn("timeout waiting for SSH connections to drain")
+		}
+	})
 }
 
 func (s *Server) removeConn(conn net.Conn) {
@@ -159,6 +184,7 @@ func (s *Server) publicKeyCallback(meta gossh.ConnMetadata, key gossh.PublicKey)
 }
 
 func (s *Server) handleConnection(conn net.Conn) {
+	defer s.wg.Done()
 	defer func() { _ = conn.Close() }()
 	defer s.removeConn(conn)
 
@@ -170,8 +196,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 	defer func() { _ = sshConn.Close() }()
 
 	sshlog.Info("client connected", "remote", conn.RemoteAddr(), "user", sshConn.User())
-	go gossh.DiscardRequests(reqs)
 
+	var sessionWg sync.WaitGroup
+	sessionWg.Add(1)
+	go func() {
+		defer sessionWg.Done()
+		gossh.DiscardRequests(reqs)
+	}()
 	for newChan := range chans {
 		if newChan.ChannelType() != "session" {
 			_ = newChan.Reject(gossh.UnknownChannelType, "unsupported channel type")
@@ -182,8 +213,13 @@ func (s *Server) handleConnection(conn net.Conn) {
 			sshlog.Warn("channel accept error", "err", err)
 			continue
 		}
-		go s.handleSession(channel, requests, sshConn)
+		sessionWg.Add(1)
+		go func() {
+			defer sessionWg.Done()
+			s.handleSession(channel, requests, sshConn)
+		}()
 	}
+	sessionWg.Wait()
 }
 
 func (s *Server) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request, conn *gossh.ServerConn) {
@@ -201,7 +237,9 @@ func (s *Server) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request, con
 			if req.WantReply {
 				_ = req.Reply(true, nil)
 			}
+			reqDone := make(chan struct{})
 			go func() {
+				defer close(reqDone)
 				for req := range reqs {
 					if req.WantReply {
 						_ = req.Reply(false, nil)
@@ -209,6 +247,8 @@ func (s *Server) handleSession(ch gossh.Channel, reqs <-chan *gossh.Request, con
 				}
 			}()
 			s.runTerminal(ch, conn)
+			_ = ch.Close() // close channel to drain reqs goroutine
+			<-reqDone
 			return
 		default:
 			if req.WantReply {
@@ -249,7 +289,7 @@ func (s *Server) runTerminal(ch gossh.Channel, conn *gossh.ServerConn) {
 		}
 		if strings.HasPrefix(line, "/") {
 			if s.commands.Dispatch(line, session, terminal, s.hub) {
-				return // /quit
+				break
 			}
 			continue
 		}
