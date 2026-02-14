@@ -90,10 +90,21 @@ The `msg_type` field determines how `payload` should be deserialized.
 | 2 | `MsgTypePeerHelloAck` | `PeerHello` | Responder → Initiator | No |
 | 3 | `MsgTypeChat` | `ChatMessage` | Bidirectional | Yes |
 | 4 | `MsgTypePeerExchange` | `PeerExchange` | Bidirectional | No |
-| 5-99 | — | Reserved for core protocol | — | — |
+| 5 | `MsgTypeKeepalive` | *(empty)* | Bidirectional | No |
+| 6-99 | — | Reserved for core protocol | — | — |
 | 1000+ | — | Reserved for plugins (Phase 7) | — | — |
 
-Messages with `msg_type` 1, 2, and 4 are handled directly by the peer connection layer. All other message types (including `MsgTypeChat`) are routed through the gossip engine for deduplication, signature verification, rate limiting, and forwarding.
+Messages with `msg_type` 1, 2, 4, and 5 are handled directly by the peer connection layer. All other message types (including `MsgTypeChat`) are routed through the gossip engine for deduplication, signature verification, rate limiting, and forwarding.
+
+## Keepalive
+
+A keepalive is a minimal `Envelope` with only `msg_type = 5` set — no payload, no signature, no message ID. It exists purely to reset the peer's read deadline and prevent idle timeout disconnection.
+
+Keepalives are:
+
+- **Sent** by the send loop every `keepalive_interval` (default 20s). The timer resets whenever a real message is sent, so active connections produce no redundant keepalives.
+- **Received** by the receive loop and silently dropped after resetting the read deadline. They are never forwarded, gossiped, or logged.
+- **Lightweight**: the Noise-encrypted channel guarantees integrity, so no ED25519 signature is needed.
 
 ## PeerHello
 

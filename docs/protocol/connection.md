@@ -26,10 +26,10 @@ Duplicate / MaxPeers Check
 PeerExchange (initial)
     │
     ▼
-Steady State (send/recv loops)
+Steady State (send/recv loops + keepalive)
     │
     ▼
-Disconnect + Cleanup
+Disconnect (error, idle timeout, or shutdown) + Cleanup
 ```
 
 ## TCP Connection
@@ -58,7 +58,9 @@ After the handshake:
 
 ## PeerHello Exchange
 
-The PeerHello exchange is the first application-level communication after encryption is established. It serves two purposes:
+The PeerHello exchange is the first application-level communication after encryption is established. A **handshake timeout** (default 10s) is applied as both a read and write deadline for the entire exchange, preventing a slow or malicious peer from blocking the goroutine indefinitely when sending or receiving. The deadlines are cleared on success before entering steady state.
+
+The exchange serves two purposes:
 
 1. **Identity declaration.** Each side sends its Node ID, ED25519 public key, version, tags, and network reachability.
 2. **Identity verification.** Each side verifies the peer's claimed identity against the Noise-authenticated key.
@@ -138,13 +140,31 @@ Reads from a buffered channel (`sendCh`, capacity 64) and writes framed messages
 
 If the send buffer is full, messages are dropped with a log warning. This provides backpressure without blocking the hub.
 
+A **keepalive ticker** (default 20s) runs alongside the send channel. If no real message is sent within the interval, a [Keepalive](messages.md#keepalive) frame is written to prevent the remote peer's read deadline from expiring. The ticker resets after every real send, so active connections produce no redundant keepalives.
+
+A **write deadline** (default 10s) is set before each write (both real messages and keepalives). If the write cannot complete within this window — e.g. the remote peer has stopped reading and the TCP send buffer is full — the send loop exits with an error, triggering disconnection.
+
 ### Receive Loop
+
+Before each read, a **read deadline** is set on the underlying TCP connection (default 60s). If no data arrives within this window — neither application messages nor keepalives — the connection is considered idle and is closed with a `WARN` log (`peer idle timeout`).
 
 Reads framed messages from the Noise connection, deserializes the `Envelope`, and dispatches by message type:
 
+- **Keepalive** (msg_type 5): Silently consumed. The read deadline was already reset by the successful read; no further processing is needed.
 - **PeerHello / PeerHelloAck** (msg_type 1, 2): Silently dropped. These are point-to-point handshake messages and must never appear after the initial exchange.
 - **PeerExchange** (msg_type 4): Handled directly at the peer level — per-peer deduplication, signature verification against the peer's known ED25519 key, sender verification (`sender_id` must match the peer's Node ID), then routed to the manager's `onPeerExchange` callback for merging into the known peers table.
 - **All other types** (including ChatMessage, msg_type 3): Routed to the [gossip engine](../architecture.md#gossip-engine) via the `onGossipMessage` callback. The gossip engine performs centralized deduplication, key lookup with [auto-learn](messages.md#auto-learn), signature verification, rate limiting, local delivery to registered handlers, and forwarding to a random peer subset if `hop_count > 1`.
+
+### Connection Health
+
+The keepalive/idle-timeout mechanism ensures that dead peers (crashed, partitioned, zombie) are detected and evicted within the idle timeout window:
+
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| Idle timeout | 60s | Read deadline on the TCP connection. If no data arrives within this window, the peer is disconnected. |
+| Keepalive interval | 20s | How often a keepalive frame is sent when no real traffic flows. Must be less than the idle timeout. |
+| Write timeout | 10s | Write deadline per frame. If a write blocks longer than this, the connection is closed. |
+| Handshake timeout | 10s | Read and write deadlines for the PeerHello exchange. Prevents slow peers from blocking indefinitely. |
 
 ### Seen Set Cleanup
 
@@ -155,7 +175,7 @@ Two levels of deduplication operate concurrently:
 
 ## Disconnection
 
-A peer connection ends when either the send loop or receive loop encounters an error (typically a read/write failure on the underlying TCP connection). The sequence is:
+A peer connection ends when either the send loop or receive loop encounters an error. Common causes are a read/write failure on the underlying TCP connection, or an **idle timeout** when no data (including keepalives) arrives within the read deadline. The sequence is:
 
 1. The first loop to fail returns an error.
 2. `Peer.Close()` is called, which closes the `done` channel and the Noise connection.

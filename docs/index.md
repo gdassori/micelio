@@ -32,6 +32,7 @@ The protocol is implemented through Phase 4:
 - **Phase 2** — Direct connections: Noise-encrypted TCP, protobuf wire protocol, PeerHello handshake, bidirectional chat relay, message signing, deduplication.
 - **Phase 3** — Peer discovery: PeerExchange messages, automatic mesh formation, persistent peer table (bbolt), exponential backoff, MaxPeers enforcement, advertise address support.
 - **Phase 4** — Gossip protocol: multi-hop message relay (fanout=3, max_hops=10), centralized deduplication via seen cache, auto-key-learning from `sender_pubkey`, per-sender rate limiting, trust-level keyring.
+- **Connection health** — Read deadlines (60s), keepalive messages (20s), write deadlines (10s), and handshake timeout (10s) detect and evict dead or unresponsive peers.
 
 Phases 5-7 (distributed state, tagging, plugins) are planned but not yet implemented.
 
@@ -46,4 +47,8 @@ Phases 5-7 (distributed state, tagging, plugins) are planned but not yet impleme
 | Frame magic | `0x4D49` ("MI") |
 | Max payload | 1 MB |
 | Signature | ED25519 over `message_id ‖ sender_id ‖ lamport_ts ‖ msg_type ‖ payload` |
+| Idle timeout | 60 seconds (read deadline per connection) |
+| Keepalive interval | 20 seconds (suppressed when real traffic flows) |
+| Write timeout | 10 seconds (per-frame write deadline) |
+| Handshake timeout | 10 seconds (PeerHello exchange deadline) |
 | Deduplication | Gossip engine seen cache (`message_id`, TTL 5 min) + per-peer seen set for PeerExchange |

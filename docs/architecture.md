@@ -104,6 +104,7 @@ Manages all peer connections. Responsibilities:
 - **Fanout loop:** reads from the Hub's `remoteSend` channel, wraps messages in signed envelopes (with `sender_pubkey`), and broadcasts via the gossip engine.
 - **Gossip integration:** creates the gossip engine, registers message handlers, registers peer public keys with `TrustDirectlyVerified` during PeerHello, and routes incoming gossip messages from peers to the engine.
 - **Peer lifecycle:** adds/removes peers, prevents duplicates, enforces `MaxPeers`.
+- **Peer timeouts:** applies configurable idle timeout and keepalive interval to each new peer via `SetPeerTimeouts()` (used in tests to shorten defaults).
 - **Peer discovery:** exchanges known peers via PeerExchange messages and auto-dials discovered peers (excluding bootstrap addresses, which are managed separately by `dialWithBackoff`).
 
 **Source:** `internal/transport/`
@@ -127,8 +128,9 @@ Exponential backoff (`min(2^(failCount-1), 30)` seconds) prevents connection sto
 
 Represents a single connection to a remote node. Each Peer runs:
 
-- A **send loop** that reads from a buffered channel and writes framed messages.
-- A **receive loop** that reads framed messages, deserializes envelopes, and dispatches by message type:
+- A **send loop** that reads from a buffered channel and writes framed messages. A keepalive ticker (default 20s) sends a minimal [Keepalive](protocol/messages.md#keepalive) frame when no real traffic flows, preventing the remote peer's read deadline from expiring. The ticker resets on every real send. A write deadline (default 10s) ensures writes to unresponsive peers fail fast.
+- A **receive loop** that sets a read deadline (default 60s) before each read and dispatches by message type:
+    - `Keepalive` (msg_type=5): silently consumed — the read deadline was already reset by the successful read.
     - `PeerHello`/`PeerHelloAck` (msg_type=1,2): silently dropped — handshake messages are point-to-point only and must never be gossip-relayed.
     - `PeerExchange` (msg_type=4): per-peer deduplication, signature verification against the peer's known key, then routed to the manager's `onPeerExchange` callback.
     - All other types: routed to the gossip engine via `onGossipMessage` for centralized dedup, key verification, rate limiting, and forwarding.
@@ -184,8 +186,10 @@ ReadFrame() → validate magic, version, length → payload bytes
         │
         ▼
 Peer.recvLoop():
+  0. SetReadDeadline (idle timeout, default 60s)
   1. Unmarshal Envelope protobuf
   2. Route by msg_type:
+     - Keepalive (5) → silently consumed (deadline already reset)
      - PeerExchange (4) → per-peer dedup + verify + handlePeerExchange
      - All others → onGossipMessage callback
         │

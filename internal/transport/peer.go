@@ -5,8 +5,11 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
+	"net"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -24,9 +27,15 @@ const (
 	MsgTypePeerHelloAck uint32 = 2
 	MsgTypeChat         uint32 = 3
 	MsgTypePeerExchange uint32 = 4
+	MsgTypeKeepalive    uint32 = 5
 
 	seenTTL     = 5 * time.Minute
 	seenCleanup = 1 * time.Minute
+
+	defaultIdleTimeout       = 60 * time.Second
+	defaultKeepaliveInterval = 20 * time.Second
+	defaultWriteTimeout      = 10 * time.Second
+	defaultHandshakeTimeout  = 10 * time.Second
 )
 
 // Peer represents a connection to a single remote node.
@@ -54,6 +63,11 @@ type Peer struct {
 	sendCh chan []byte // framed envelope bytes ready to write
 	done   chan struct{}
 
+	idleTimeout       time.Duration
+	keepaliveInterval time.Duration
+	writeTimeout      atomic.Int64 // nanoseconds; use atomics for concurrent access
+	handshakeTimeout  time.Duration
+
 	seen   map[string]time.Time
 	seenMu sync.Mutex
 
@@ -61,21 +75,42 @@ type Peer struct {
 }
 
 func newPeer(conn *noiseConn, peerX25519 []byte, localID *identity.Identity, hub *partyline.Hub, initiator bool) *Peer {
-	return &Peer{
-		conn:       conn,
-		peerX25519: peerX25519,
-		localID:    localID,
-		hub:        hub,
-		initiator:  initiator,
-		sendCh:     make(chan []byte, 64),
-		done:       make(chan struct{}),
-		seen:       make(map[string]time.Time),
+	p := &Peer{
+		conn:              conn,
+		peerX25519:        peerX25519,
+		localID:           localID,
+		hub:               hub,
+		initiator:         initiator,
+		sendCh:            make(chan []byte, 64),
+		done:              make(chan struct{}),
+		idleTimeout:       defaultIdleTimeout,
+		keepaliveInterval: defaultKeepaliveInterval,
+		handshakeTimeout:  defaultHandshakeTimeout,
+		seen:              make(map[string]time.Time),
 	}
+	p.writeTimeout.Store(int64(defaultWriteTimeout))
+	return p
 }
 
 // ExchangeHello performs the PeerHello / PeerHelloAck exchange and verifies
 // the peer's identity against the Noise-authenticated X25519 key.
+// A handshake timeout prevents a slow or malicious peer from blocking the
+// goroutine indefinitely.
 func (p *Peer) ExchangeHello(localCfg HelloConfig) error {
+	// Set a deadline for the entire hello exchange. Cleared on success so
+	// it doesn't interfere with the subsequent send/recv loops.
+	deadline := time.Now().Add(p.handshakeTimeout)
+	if err := p.conn.SetReadDeadline(deadline); err != nil {
+		return fmt.Errorf("set handshake read deadline: %w", err)
+	}
+	if err := p.conn.SetWriteDeadline(deadline); err != nil {
+		return fmt.Errorf("set handshake write deadline: %w", err)
+	}
+	defer func() {
+		_ = p.conn.SetReadDeadline(time.Time{})
+		_ = p.conn.SetWriteDeadline(time.Time{})
+	}()
+
 	hello := &pb.PeerHello{
 		NodeId:        p.localID.NodeID,
 		Version:       "0.1.0",
@@ -129,7 +164,7 @@ func (p *Peer) SendRaw(data []byte) bool {
 	case p.sendCh <- data:
 		return true
 	default:
-		tlog.Warn("send buffer full", "peer", p.NodeID)
+		tlog.Warn("send buffer full", "peer", formatNodeIDShort(p.NodeID))
 		return false
 	}
 }
@@ -142,49 +177,103 @@ func (p *Peer) Close() {
 	})
 }
 
+func (p *Peer) sendWithDeadline(data []byte) error {
+	if err := p.conn.SetWriteDeadline(time.Now().Add(time.Duration(p.writeTimeout.Load()))); err != nil {
+		return fmt.Errorf("set write deadline: %w", err)
+	}
+	if err := WriteFrame(p.conn, data); err != nil {
+		var ne net.Error
+		if errors.As(err, &ne) && ne.Timeout() {
+			tlog.Warn("peer write timeout", "peer", formatNodeIDShort(p.NodeID))
+		}
+		return fmt.Errorf("write frame: %w", err)
+	}
+	return nil
+}
+
 func (p *Peer) sendLoop() error {
+	timer := time.NewTimer(p.keepaliveInterval)
+	defer timer.Stop()
 	for {
 		select {
 		case data := <-p.sendCh:
-			if err := WriteFrame(p.conn, data); err != nil {
-				return fmt.Errorf("write frame: %w", err)
+			if err := p.sendWithDeadline(data); err != nil {
+				return err
 			}
+			if !timer.Stop() {
+				select {
+				case <-timer.C:
+				default:
+				}
+			}
+			timer.Reset(p.keepaliveInterval)
+		case <-timer.C:
+			if err := p.writeKeepalive(); err != nil {
+				return err
+			}
+			timer.Reset(p.keepaliveInterval)
 		case <-p.done:
 			return nil
 		}
 	}
 }
 
+func (p *Peer) writeKeepalive() error {
+	env := &pb.Envelope{MsgType: MsgTypeKeepalive}
+	data, err := proto.Marshal(env)
+	if err != nil {
+		return err
+	}
+	return p.sendWithDeadline(data)
+}
+
 func (p *Peer) recvLoop() error {
 	for {
+		if err := p.conn.SetReadDeadline(time.Now().Add(p.idleTimeout)); err != nil {
+			select {
+			case <-p.done:
+				return nil
+			default:
+				return fmt.Errorf("set read deadline: %w", err)
+			}
+		}
 		data, err := ReadFrame(p.conn)
 		if err != nil {
 			select {
 			case <-p.done:
 				return nil
 			default:
+				var ne net.Error
+				if errors.As(err, &ne) && ne.Timeout() {
+					tlog.Warn("peer idle timeout", "peer", formatNodeIDShort(p.NodeID))
+					return err
+				}
 				return fmt.Errorf("read frame: %w", err)
 			}
 		}
 
 		var env pb.Envelope
 		if err := proto.Unmarshal(data, &env); err != nil {
-			tlog.Error("unmarshal envelope", "peer", p.NodeID, "err", err)
+			tlog.Error("unmarshal envelope", "peer", formatNodeIDShort(p.NodeID), "err", err)
 			continue
 		}
 
 		switch env.MsgType {
+		case MsgTypeKeepalive:
+			// Keepalive resets the read deadline (already done above); no further processing.
+			continue
+
 		case MsgTypePeerExchange:
 			// Direct peer-to-peer message: per-peer dedup + signature check.
 			if p.isDuplicate(env.MessageId) {
 				continue
 			}
 			if !verifySignature(&env, p.edPubKey) {
-				tlog.Warn("invalid signature on peer_exchange", "peer", p.NodeID, "msg_id", env.MessageId)
+				tlog.Warn("invalid signature on peer_exchange", "peer", formatNodeIDShort(p.NodeID), "msg_id", env.MessageId)
 				continue
 			}
 			if env.SenderId != p.NodeID {
-				tlog.Warn("sender_id mismatch on peer_exchange", "peer", p.NodeID, "claimed", env.SenderId)
+				tlog.Warn("sender_id mismatch on peer_exchange", "peer", formatNodeIDShort(p.NodeID), "claimed", env.SenderId)
 				continue
 			}
 			p.handlePeerExchange(&env)
@@ -207,7 +296,7 @@ func (p *Peer) recvLoop() error {
 func (p *Peer) handlePeerExchange(env *pb.Envelope) {
 	var px pb.PeerExchange
 	if err := proto.Unmarshal(env.Payload, &px); err != nil {
-		tlog.Error("unmarshal peer_exchange", "peer", p.NodeID, "err", err)
+		tlog.Error("unmarshal peer_exchange", "peer", formatNodeIDShort(p.NodeID), "err", err)
 		return
 	}
 	if p.onPeerExchange != nil {

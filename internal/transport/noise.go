@@ -6,6 +6,7 @@ import (
 	"io"
 	"net"
 	"sync"
+	"time"
 
 	"github.com/flynn/noise"
 )
@@ -172,6 +173,21 @@ func (nc *noiseConn) Read(p []byte) (int, error) {
 		nc.readBuf = plaintext[n:]
 	}
 	return n, nil
+}
+
+// SetReadDeadline sets the read deadline on the underlying TCP connection.
+//
+// The deadline only applies when readBuf is empty, i.e. when Read would
+// block on the TCP socket. For peers that use WriteFrame as implemented
+// here (one complete frame per Write call), each Noise message carries
+// exactly one frame, so readBuf is normally empty between ReadFrame calls.
+func (nc *noiseConn) SetReadDeadline(t time.Time) error {
+	return nc.conn.SetReadDeadline(t)
+}
+
+// SetWriteDeadline sets the write deadline on the underlying TCP connection.
+func (nc *noiseConn) SetWriteDeadline(t time.Time) error {
+	return nc.conn.SetWriteDeadline(t)
 }
 
 // Close closes the underlying connection.
