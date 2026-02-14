@@ -41,6 +41,7 @@ Named after fungal mycelium — a decentralized network where every hypha is equ
 - **Transport:** TCP + Noise Protocol Framework
 - **Storage:** bbolt (embedded B+ tree)
 - **SSH:** `golang.org/x/crypto/ssh`
+- **Logging:** `log/slog` (structured logging with text/json formats)
 - **Build:** Static binaries, zero external dependencies, `CGO_ENABLED=0`
 
 ## Build
@@ -64,6 +65,9 @@ bin/micelio
 
 # Override defaults via flags
 bin/micelio -ssh-listen 127.0.0.1:2222 -name my-node -data-dir ~/.micelio
+
+# Control log level
+bin/micelio -log-level debug
 
 # Connect two nodes
 bin/micelio -name node-a -ssh-listen 127.0.0.1:2222 -config nodeA.toml
@@ -113,12 +117,18 @@ max_peers = 15
 exchange_interval = "30s"   # peer exchange period
 discovery_interval = "10s"  # discovery scan period
 
+[logging]
+level = "info"    # debug, info, warn, warning, error (default: info)
+format = "text"   # text or json (default: text)
+
 # Connection health (hardcoded defaults, not yet configurable)
 # idle_timeout = "60s"        # disconnect silent peers after this
 # keepalive_interval = "20s"  # send keepalive when no real traffic
 ```
 
-CLI flags take precedence over config file values.
+CLI flags take precedence over config file values. Available flags: `-config`, `-name`, `-data-dir`, `-ssh-listen`, `-log-level`.
+
+**Configuration Validation**: All config values are validated at startup. Invalid addresses, negative numeric values, or unknown log levels will cause the node to exit with a clear error message identifying the problematic field.
 
 ## Partyline Commands
 
@@ -145,7 +155,6 @@ micelio/
 │   └── transport/         # Noise encryption, wire framing, peer management, discovery
 ├── pkg/proto/             # Generated protobuf Go code + sign/verify helpers
 ├── proto/                 # Protobuf definitions
-├── plugin/builtin/        # Built-in plugins (ping, etc.)
 ├── docs/                  # Protocol documentation (MkDocs)
 ├── Makefile
 └── go.mod
