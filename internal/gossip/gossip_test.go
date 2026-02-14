@@ -6,6 +6,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"log/slog"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -934,5 +935,112 @@ func TestEngineEmptyEnvelope(t *testing.T) {
 	// Log assertions
 	if !capture.Has(slog.LevelDebug, "envelope rejected: empty id") {
 		t.Error("expected DEBUG 'envelope rejected: empty id'")
+	}
+}
+
+func TestEngineSizeValidation(t *testing.T) {
+	tests := []struct {
+		name     string
+		payload  []byte
+		mutate   func(*pb.Envelope)                       // post-sign mutation (ok for rejection tests)
+		buildEnv func(*testing.T, testIdentity) *pb.Envelope // custom pre-sign envelope
+		extraKR  func(*Engine, testIdentity)               // additional keyring entries
+		wantDlv  int
+		wantWarn string
+		notSeen  bool
+	}{
+		{
+			name: "oversized payload", payload: make([]byte, MaxGossipPayload+1),
+			wantWarn: "envelope rejected: oversized payload", notSeen: true,
+		},
+		{
+			name: "oversized message_id", payload: []byte("hello"),
+			mutate:  func(env *pb.Envelope) { env.MessageId = strings.Repeat("x", MaxFieldLen+1) },
+			wantWarn: "envelope rejected: oversized field", notSeen: true,
+		},
+		{
+			name: "oversized sender_id", payload: []byte("hello"),
+			mutate:  func(env *pb.Envelope) { env.SenderId = strings.Repeat("y", MaxFieldLen+1) },
+			wantWarn: "envelope rejected: oversized field", notSeen: true,
+		},
+		{
+			name: "payload at limit accepted", payload: make([]byte, MaxGossipPayload),
+			wantDlv: 1,
+		},
+		{
+			name: "message_id at limit accepted",
+			buildEnv: func(t *testing.T, sender testIdentity) *pb.Envelope {
+				t.Helper()
+				env := &pb.Envelope{
+					MessageId: strings.Repeat("m", MaxFieldLen),
+					SenderId:  sender.nodeID,
+					MsgType:   3, HopCount: 5,
+					Payload: []byte("hello"),
+				}
+				pb.SignEnvelope(env, sender.priv)
+				return env
+			},
+			wantDlv: 1,
+		},
+		{
+			name: "sender_id at limit accepted",
+			buildEnv: func(t *testing.T, sender testIdentity) *pb.Envelope {
+				t.Helper()
+				env := &pb.Envelope{
+					MessageId: uuid.New().String(),
+					SenderId:  strings.Repeat("s", MaxFieldLen),
+					MsgType:   3, HopCount: 5,
+					Payload: []byte("hello"),
+				}
+				pb.SignEnvelope(env, sender.priv)
+				return env
+			},
+			extraKR: func(engine *Engine, sender testIdentity) {
+				engine.KeyRing.Add(strings.Repeat("s", MaxFieldLen), sender.pub, TrustDirectlyVerified)
+			},
+			wantDlv: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capture := logging.CaptureForTest()
+			defer capture.Restore()
+
+			local := newTestIdentity(t)
+			sender := newTestIdentity(t)
+
+			var delivered int
+			engine := NewEngine(local.nodeID, func() []PeerHandle { return nil })
+			engine.KeyRing.Add(sender.nodeID, sender.pub, TrustDirectlyVerified)
+			if tt.extraKR != nil {
+				tt.extraKR(engine, sender)
+			}
+			engine.RegisterHandler(3, func(_ string, _ []byte) { delivered++ })
+
+			var env *pb.Envelope
+			if tt.buildEnv != nil {
+				env = tt.buildEnv(t, sender)
+			} else {
+				env = makeSignedEnvelope(t, sender, 3, tt.payload, 5)
+				if tt.mutate != nil {
+					tt.mutate(env)
+				}
+			}
+			engine.HandleIncoming("peer-a", env)
+
+			if delivered != tt.wantDlv {
+				t.Fatalf("deliveries: got %d, want %d", delivered, tt.wantDlv)
+			}
+			if tt.wantWarn != "" && !capture.Has(slog.LevelWarn, tt.wantWarn) {
+				t.Errorf("expected WARN %q", tt.wantWarn)
+			}
+			if tt.wantWarn == "" && capture.Count(slog.LevelWarn) != 0 {
+				t.Error("unexpected WARN log")
+			}
+			if tt.notSeen && engine.Seen.Has(env.MessageId) {
+				t.Fatal("rejected message should not be marked as seen")
+			}
+		})
 	}
 }

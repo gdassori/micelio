@@ -23,6 +23,13 @@ const (
 	DefaultMaxPerSec = 10.0
 	seenCleanup      = 1 * time.Minute
 	limiterCleanup   = 1 * time.Minute
+
+	// MaxGossipPayload is the largest env.Payload the engine will accept.
+	// Prevents amplification of near-frame-limit messages across the mesh.
+	MaxGossipPayload = 64 << 10 // 64 KB
+
+	// MaxFieldLen caps string identifier fields (MessageId, SenderId).
+	MaxFieldLen = 128
 )
 
 // PeerHandle is a lightweight reference to a connected peer that the engine
@@ -102,9 +109,28 @@ func (e *Engine) RegisterHandler(msgType uint32, handler MessageHandler) {
 // It performs deduplication, signature verification, rate limiting, hop count
 // enforcement, local delivery, and forwarding.
 func (e *Engine) HandleIncoming(fromPeerID string, env *pb.Envelope) {
-	// 0. Reject malformed envelopes missing required identifiers.
+	// 0a. Reject malformed envelopes missing required identifiers.
 	if env.MessageId == "" || env.SenderId == "" {
 		logger.Debug("envelope rejected: empty id")
+		return
+	}
+
+	// 0b. Reject oversized identifier fields.
+	if len(env.MessageId) > MaxFieldLen || len(env.SenderId) > MaxFieldLen {
+		logger.Warn("envelope rejected: oversized field",
+			"sender", formatShort(env.SenderId),
+			"msg_type", env.MsgType,
+			"msg_id_len", len(env.MessageId),
+			"sender_id_len", len(env.SenderId))
+		return
+	}
+
+	// 0c. Reject oversized payloads to prevent amplification attacks.
+	if len(env.Payload) > MaxGossipPayload {
+		logger.Warn("envelope rejected: oversized payload",
+			"sender", formatShort(env.SenderId),
+			"msg_type", env.MsgType,
+			"size", len(env.Payload))
 		return
 	}
 
