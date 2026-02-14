@@ -67,6 +67,7 @@ type Engine struct {
 	// Statistics (atomic counters)
 	statsReceived  atomic.Uint64 // messages received and validated
 	statsDelivered atomic.Uint64 // messages delivered to local handlers
+	statsBroadcast atomic.Uint64 // messages broadcast to peers
 	statsForwarded atomic.Uint64 // messages forwarded to peers
 	statsDropped   atomic.Uint64 // messages dropped (buffer full)
 }
@@ -116,6 +117,7 @@ func (e *Engine) RegisterHandler(msgType uint32, handler MessageHandler) {
 type Stats struct {
 	Received  uint64 // messages received and validated
 	Delivered uint64 // messages delivered to local handlers
+	Broadcast uint64 // messages broadcast to peers
 	Forwarded uint64 // messages forwarded to peers
 	Dropped   uint64 // messages dropped (buffer full)
 }
@@ -125,6 +127,7 @@ func (e *Engine) Stats() Stats {
 	return Stats{
 		Received:  e.statsReceived.Load(),
 		Delivered: e.statsDelivered.Load(),
+		Broadcast: e.statsBroadcast.Load(),
 		Forwarded: e.statsForwarded.Load(),
 		Dropped:   e.statsDropped.Load(),
 	}
@@ -266,6 +269,8 @@ func (e *Engine) Broadcast(env *pb.Envelope) (sent, total int) {
 		}
 	}
 
+	e.statsBroadcast.Add(uint64(sent))
+
 	dropped := total - sent
 	if dropped > 0 {
 		e.statsDropped.Add(uint64(dropped))
@@ -320,8 +325,7 @@ func (e *Engine) forwardTo(raw []byte, excludePeerID string) {
 
 	logger.Debug("message forwarded",
 		"sent", sent,
-		"total", total,
-		"candidates", len(candidates))
+		"total", total)
 }
 
 func formatShort(id string) string {

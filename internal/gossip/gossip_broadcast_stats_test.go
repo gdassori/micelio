@@ -65,6 +65,9 @@ func TestBroadcastReturnsCorrectCounts(t *testing.T) {
 
 	// Verify stats
 	stats := engine.Stats()
+	if stats.Broadcast != 2 {
+		t.Errorf("broadcast: got %d, want 2 (successful sends)", stats.Broadcast)
+	}
 	if stats.Dropped != 1 {
 		t.Errorf("dropped: got %d, want 1", stats.Dropped)
 	}
@@ -100,8 +103,11 @@ func TestBroadcastPartialDeliveryWarning(t *testing.T) {
 		t.Error("expected WARN 'partial broadcast delivery'")
 	}
 
-	// Verify dropped counter
+	// Verify counters
 	stats := engine.Stats()
+	if stats.Broadcast != 2 {
+		t.Errorf("broadcast: got %d, want 2 (successful sends)", stats.Broadcast)
+	}
 	if stats.Dropped != 2 {
 		t.Errorf("dropped: got %d, want 2", stats.Dropped)
 	}
@@ -135,8 +141,11 @@ func TestBroadcastAllSuccess(t *testing.T) {
 		t.Errorf("unexpected WARN logs: %d", capture.Count(slog.LevelWarn))
 	}
 
-	// No dropped messages
+	// Verify counters
 	stats := engine.Stats()
+	if stats.Broadcast != 2 {
+		t.Errorf("broadcast: got %d, want 2 (all successful)", stats.Broadcast)
+	}
 	if stats.Dropped != 0 {
 		t.Errorf("dropped: got %d, want 0", stats.Dropped)
 	}
@@ -256,6 +265,9 @@ func TestStats(t *testing.T) {
 	if stats.Delivered != 1 {
 		t.Errorf("delivered: got %d, want 1 (only msg type 3 should be delivered)", stats.Delivered)
 	}
+	if stats.Broadcast != 1 {
+		t.Errorf("broadcast: got %d, want 1 (peer-a succeeded)", stats.Broadcast)
+	}
 	if stats.Forwarded != 2 {
 		t.Errorf("forwarded: got %d, want 2 (2 messages forwarded to fanout subset)", stats.Forwarded)
 	}
@@ -313,5 +325,93 @@ func TestStatsAtomicity(t *testing.T) {
 	stats := engine.Stats()
 	if stats.Received == 0 {
 		t.Error("expected some received messages")
+	}
+}
+
+func TestBroadcastNoPeers(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
+	local := newTestIdentity(t)
+
+	// Engine with no peers
+	engine := NewEngine(local.nodeID, func() []PeerHandle {
+		return []PeerHandle{}
+	})
+
+	env := makeSignedEnvelope(t, local, 3, []byte("test"), 5)
+	sent, total := engine.Broadcast(env)
+
+	if sent != 0 {
+		t.Errorf("sent: got %d, want 0", sent)
+	}
+	if total != 0 {
+		t.Errorf("total: got %d, want 0", total)
+	}
+
+	// No WARN log when there are no peers
+	if capture.Count(slog.LevelWarn) != 0 {
+		t.Errorf("unexpected WARN logs: %d", capture.Count(slog.LevelWarn))
+	}
+
+	// No counters incremented
+	stats := engine.Stats()
+	if stats.Broadcast != 0 {
+		t.Errorf("broadcast: got %d, want 0", stats.Broadcast)
+	}
+	if stats.Dropped != 0 {
+		t.Errorf("dropped: got %d, want 0", stats.Dropped)
+	}
+}
+
+func TestForwardToZeroCandidates(t *testing.T) {
+	capture := logging.CaptureForTest()
+	defer capture.Restore()
+
+	local := newTestIdentity(t)
+	sender := newTestIdentity(t)
+
+	var sendCalls int
+	var mu sync.Mutex
+
+	// Only one peer - will be excluded as the sender
+	engine := NewEngine(local.nodeID, func() []PeerHandle {
+		return []PeerHandle{
+			{NodeID: "peer-a", Send: func(data []byte) bool {
+				mu.Lock()
+				defer mu.Unlock()
+				sendCalls++
+				return true
+			}},
+		}
+	})
+
+	engine.KeyRing.Add(sender.nodeID, sender.pub, TrustDirectlyVerified)
+
+	// Message from peer-a should not be forwarded back to peer-a
+	env := makeSignedEnvelope(t, sender, 3, []byte("no forward"), 5)
+	engine.HandleIncoming("peer-a", env)
+
+	// No Send() calls should happen
+	mu.Lock()
+	calls := sendCalls
+	mu.Unlock()
+
+	if calls != 0 {
+		t.Errorf("Send() calls: got %d, want 0 (sender excluded)", calls)
+	}
+
+	// No forwarding stats
+	stats := engine.Stats()
+	if stats.Forwarded != 0 {
+		t.Errorf("forwarded: got %d, want 0", stats.Forwarded)
+	}
+	if stats.Dropped != 0 {
+		t.Errorf("dropped: got %d, want 0 (no candidates)", stats.Dropped)
+	}
+
+	// Message was received and processed
+	if stats.Received != 1 {
+		t.Errorf("received: got %d, want 1", stats.Received)
 	}
 }
