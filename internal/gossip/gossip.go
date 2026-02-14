@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"math/rand/v2"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"google.golang.org/protobuf/proto"
@@ -62,6 +63,13 @@ type Engine struct {
 
 	done     chan struct{}
 	stopOnce sync.Once
+
+	// Statistics (atomic counters)
+	statsReceived  atomic.Uint64 // messages received and validated
+	statsDelivered atomic.Uint64 // messages delivered to local handlers
+	statsBroadcast atomic.Uint64 // messages broadcast to peers
+	statsForwarded atomic.Uint64 // messages forwarded to peers
+	statsDropped   atomic.Uint64 // messages dropped (buffer full)
 }
 
 // NewEngine creates a gossip engine.
@@ -103,6 +111,28 @@ func (e *Engine) MaxHops() uint32 {
 // Must be called before Start() — not safe for concurrent use with HandleIncoming.
 func (e *Engine) RegisterHandler(msgType uint32, handler MessageHandler) {
 	e.handlers[msgType] = handler
+}
+
+// Stats represents aggregate gossip engine statistics.
+// All counters track peer-level operations, not message-level.
+// For example, broadcasting one message to 10 peers increments Broadcast by 10.
+type Stats struct {
+	Received  uint64 // unique messages received and validated (after dedup)
+	Delivered uint64 // messages delivered to local handlers
+	Broadcast uint64 // successful peer sends during broadcast operations
+	Forwarded uint64 // successful peer sends during forward operations
+	Dropped   uint64 // peer sends dropped due to full buffers
+}
+
+// Stats returns a snapshot of aggregate engine statistics.
+func (e *Engine) Stats() Stats {
+	return Stats{
+		Received:  e.statsReceived.Load(),
+		Delivered: e.statsDelivered.Load(),
+		Broadcast: e.statsBroadcast.Load(),
+		Forwarded: e.statsForwarded.Load(),
+		Dropped:   e.statsDropped.Load(),
+	}
 }
 
 // HandleIncoming processes a gossip message received from a connected peer.
@@ -188,9 +218,13 @@ func (e *Engine) HandleIncoming(fromPeerID string, env *pb.Envelope) {
 		return
 	}
 
+	// Message successfully received and validated
+	e.statsReceived.Add(1)
+
 	// 6. Deliver to local handler (if registered for this msg_type)
 	if handler, ok := e.handlers[env.MsgType]; ok {
 		handler(env.SenderId, env.Payload)
+		e.statsDelivered.Add(1)
 		logger.Debug("message delivered locally",
 			"msg_id", env.MessageId,
 			"msg_type", env.MsgType)
@@ -215,21 +249,41 @@ func (e *Engine) HandleIncoming(fromPeerID string, env *pb.Envelope) {
 // Broadcast sends a locally originated, already-signed envelope to all
 // connected peers. The caller is responsible for setting HopCount, signing
 // the envelope, etc.
-func (e *Engine) Broadcast(env *pb.Envelope) {
+// Returns (sent, total) where sent is the number of peers that accepted the
+// message and total is the number of peers attempted.
+func (e *Engine) Broadcast(env *pb.Envelope) (sent, total int) {
 	// Mark as seen so we don't re-process if it comes back
 	e.Seen.Check(env.MessageId)
 
 	raw, err := proto.Marshal(env)
 	if err != nil {
 		logger.Error("marshal broadcast", "err", err)
-		return
+		return 0, 0
 	}
 
 	// Originator sends to ALL connected peers
 	peers := e.getPeers()
+	total = len(peers)
+
 	for _, p := range peers {
-		p.Send(raw)
+		if p.Send(raw) {
+			sent++
+		}
 	}
+
+	e.statsBroadcast.Add(uint64(sent))
+
+	dropped := total - sent
+	if dropped > 0 {
+		e.statsDropped.Add(uint64(dropped))
+		logger.Warn("partial broadcast delivery",
+			"sent", sent,
+			"total", total,
+			"dropped", dropped,
+			"msg_id", env.MessageId)
+	}
+
+	return sent, total
 }
 
 // forwardTo sends serialized envelope bytes to a random subset of connected
@@ -256,11 +310,24 @@ func (e *Engine) forwardTo(raw []byte, excludePeerID string) {
 		candidates = candidates[:e.fanout]
 	}
 
+	total := len(candidates)
+	var sent int
+
 	for _, p := range candidates {
-		p.Send(raw)
+		if p.Send(raw) {
+			sent++
+		}
 	}
 
-	logger.Debug("message forwarded", "targets", len(candidates))
+	e.statsForwarded.Add(uint64(sent))
+	dropped := total - sent
+	if dropped > 0 {
+		e.statsDropped.Add(uint64(dropped))
+	}
+
+	logger.Debug("message forwarded",
+		"sent", sent,
+		"total", total)
 }
 
 func formatShort(id string) string {
