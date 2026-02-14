@@ -45,14 +45,23 @@ func main() {
 	}
 
 	// Resolve log level: CLI flag > config > env > default (info)
-	level := cfg.Logging.Level
+	// Must happen before validation so CLI log level is checked
 	if *logLevel != "" {
-		level = *logLevel
+		cfg.Logging.Level = *logLevel
 	}
-	if level == "" {
-		level = os.Getenv("MICELIO_LOG_LEVEL")
+	if cfg.Logging.Level == "" {
+		if envLevel := os.Getenv("MICELIO_LOG_LEVEL"); envLevel != "" {
+			cfg.Logging.Level = envLevel
+		}
 	}
-	logging.Init(level, cfg.Logging.Format)
+
+	// Validate configuration after all overrides
+	if err := cfg.Validate(); err != nil {
+		slog.Error("fatal: invalid configuration", "err", err)
+		os.Exit(1)
+	}
+
+	logging.Init(cfg.Logging.Level, cfg.Logging.Format)
 
 	cfg.Node.DataDir = config.ExpandHome(cfg.Node.DataDir)
 
