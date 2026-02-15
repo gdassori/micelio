@@ -44,6 +44,22 @@ func testSignedEntry(nodeID string, privKey ed25519.PrivateKey, subkey string, v
 	return e
 }
 
+// testSet is a helper that calls Set and fails the test on error.
+func testSet(t *testing.T, m *Map, subkey string, value []byte) {
+	t.Helper()
+	if _, _, err := m.Set(subkey, value); err != nil {
+		t.Fatalf("Set(%q) failed: %v", subkey, err)
+	}
+}
+
+// testDel is a helper that calls Delete and fails the test on error.
+func testDel(t *testing.T, m *Map, subkey string) {
+	t.Helper()
+	if _, _, err := m.Delete(subkey); err != nil {
+		t.Fatalf("Delete(%q) failed: %v", subkey, err)
+	}
+}
+
 func TestMapSetAndGet(t *testing.T) {
 	m, nodeID := testMap(t)
 	entry, ok, err := m.Set("color", []byte("blue"))
@@ -80,7 +96,7 @@ func TestMapGetNotFound(t *testing.T) {
 
 func TestMapLWWHigherTsWins(t *testing.T) {
 	m, _ := testMap(t)
-	m.Set("key", []byte("old"))
+	testSet(t, m, "key", []byte("old"))
 
 	remoteID, remotePriv := testID(t)
 	remote := testSignedEntry(remoteID, remotePriv, "key", []byte("new"), 100, false)
@@ -142,9 +158,9 @@ func TestMapLWWTieBreakerNodeID(t *testing.T) {
 
 func TestMapSnapshot(t *testing.T) {
 	m, nodeID := testMap(t)
-	m.Set("a", []byte("1"))
-	m.Set("b", []byte("2"))
-	m.Set("c", []byte("3"))
+	testSet(t, m, "a", []byte("1"))
+	testSet(t, m, "b", []byte("2"))
+	testSet(t, m, "c", []byte("3"))
 
 	snap := m.Snapshot()
 	if len(snap) != 3 {
@@ -168,7 +184,7 @@ func TestMapLen(t *testing.T) {
 	if m.Len() != 0 {
 		t.Fatalf("Len() = %d, want 0", m.Len())
 	}
-	m.Set("x", []byte("1"))
+	testSet(t, m, "x", []byte("1"))
 	if m.Len() != 1 {
 		t.Fatalf("Len() = %d, want 1", m.Len())
 	}
@@ -181,7 +197,7 @@ func TestMapChangeHandlerCalledOnSet(t *testing.T) {
 		called = entry
 	})
 
-	m.Set("color", []byte("red"))
+	testSet(t, m, "color", []byte("red"))
 	wantKey := nodeID + "/color"
 	if called.Key != wantKey || string(called.Value) != "red" {
 		t.Fatalf("ChangeHandler not called correctly: got %+v", called)
@@ -213,7 +229,7 @@ func TestMapConcurrentAccess(t *testing.T) {
 	for i := 0; i < n; i++ {
 		go func() {
 			defer wg.Done()
-			m.Set("key", []byte("val"))
+			_, _, _ = m.Set("key", []byte("val"))
 		}()
 		go func(ts uint64) {
 			defer wg.Done()
@@ -384,7 +400,7 @@ func TestMapMergeRejectsTamperedValue(t *testing.T) {
 
 func TestMapDeleteAndGet(t *testing.T) {
 	m, nodeID := testMap(t)
-	m.Set("color", []byte("blue"))
+	testSet(t, m, "color", []byte("blue"))
 
 	entry, ok, err := m.Delete("color")
 	if err != nil {
@@ -443,8 +459,8 @@ func TestMapDeleteWinsOverOlderSet(t *testing.T) {
 
 func TestMapSetResurrectsDelete(t *testing.T) {
 	m, nodeID := testMap(t)
-	m.Set("key", []byte("first"))
-	m.Delete("key")
+	testSet(t, m, "key", []byte("first"))
+	testDel(t, m, "key")
 
 	entry, ok, _ := m.Set("key", []byte("resurrected"))
 	if !ok {
@@ -479,7 +495,7 @@ func TestMapDeleteNotifiesChangeHandler(t *testing.T) {
 		called = entry
 	})
 
-	m.Delete("key")
+	testDel(t, m, "key")
 	wantKey := nodeID + "/key"
 	if called.Key != wantKey || !called.Deleted {
 		t.Fatalf("ChangeHandler not called on Delete: got %+v", called)
@@ -488,9 +504,9 @@ func TestMapDeleteNotifiesChangeHandler(t *testing.T) {
 
 func TestMapSnapshotIncludesTombstones(t *testing.T) {
 	m, nodeID := testMap(t)
-	m.Set("live", []byte("val"))
-	m.Set("doomed", []byte("val"))
-	m.Delete("doomed")
+	testSet(t, m, "live", []byte("val"))
+	testSet(t, m, "doomed", []byte("val"))
+	testDel(t, m, "doomed")
 
 	snap := m.Snapshot()
 	if len(snap) != 2 {
@@ -511,8 +527,8 @@ func TestMapSnapshotIncludesTombstones(t *testing.T) {
 
 func TestMapGC(t *testing.T) {
 	m, nodeID := testMap(t)
-	m.Set("live", []byte("val"))
-	m.Delete("dead")
+	testSet(t, m, "live", []byte("val"))
+	testDel(t, m, "dead")
 
 	deadKey := nodeID + "/dead"
 	removed := m.GC(0)
@@ -530,7 +546,7 @@ func TestMapGC(t *testing.T) {
 
 func TestMapGCPreservesRecentTombstones(t *testing.T) {
 	m, _ := testMap(t)
-	m.Delete("recent")
+	testDel(t, m, "recent")
 
 	removed := m.GC(24 * time.Hour)
 	if len(removed) != 0 {
@@ -543,8 +559,8 @@ func TestMapGCPreservesRecentTombstones(t *testing.T) {
 
 func TestMapGCResurrectedKeyNotCollected(t *testing.T) {
 	m, nodeID := testMap(t)
-	m.Delete("key")
-	m.Set("key", []byte("alive"))
+	testDel(t, m, "key")
+	testSet(t, m, "key", []byte("alive"))
 
 	removed := m.GC(0)
 	if len(removed) != 0 {
@@ -561,8 +577,8 @@ func TestMapGCResurrectedKeyNotCollected(t *testing.T) {
 
 func TestDigest(t *testing.T) {
 	m, nodeID := testMap(t)
-	m.Set("a", []byte("1")) // ts=1
-	m.Set("b", []byte("2")) // ts=2
+	testSet(t, m, "a", []byte("1")) // ts=1
+	testSet(t, m, "b", []byte("2")) // ts=2
 
 	remoteID, remotePriv := testID(t)
 	e := testSignedEntry(remoteID, remotePriv, "x", []byte("v"), 50, false)
@@ -590,8 +606,8 @@ func TestDigestEmpty(t *testing.T) {
 
 func TestSnapshotDelta(t *testing.T) {
 	m, nodeID := testMap(t)
-	m.Set("a", []byte("1")) // ts=1
-	m.Set("b", []byte("2")) // ts=2
+	testSet(t, m, "a", []byte("1")) // ts=1
+	testSet(t, m, "b", []byte("2")) // ts=2
 
 	remoteID, remotePriv := testID(t)
 	e1 := testSignedEntry(remoteID, remotePriv, "x", []byte("old"), 10, false)
@@ -624,8 +640,8 @@ func TestSnapshotDelta(t *testing.T) {
 
 func TestSnapshotDeltaEmptyKnown(t *testing.T) {
 	m, _ := testMap(t)
-	m.Set("a", []byte("1"))
-	m.Set("b", []byte("2"))
+	testSet(t, m, "a", []byte("1"))
+	testSet(t, m, "b", []byte("2"))
 
 	remoteID, remotePriv := testID(t)
 	e := testSignedEntry(remoteID, remotePriv, "x", []byte("v"), 10, false)
@@ -645,7 +661,7 @@ func TestSnapshotDeltaEmptyKnown(t *testing.T) {
 
 func TestSnapshotDeltaUnknownNode(t *testing.T) {
 	m, nodeID := testMap(t)
-	m.Set("a", []byte("1"))
+	testSet(t, m, "a", []byte("1"))
 
 	remoteID, remotePriv := testID(t)
 	e := testSignedEntry(remoteID, remotePriv, "x", []byte("v"), 10, false)

@@ -4,7 +4,6 @@ import (
 	"crypto/ed25519"
 	"crypto/sha256"
 	"encoding/hex"
-	"os"
 	"path/filepath"
 	"testing"
 
@@ -274,8 +273,4 @@ func TestDeleteEntryFromStore(t *testing.T) {
 
 func TestDeleteEntryNilStore(t *testing.T) {
 	DeleteEntry(nil, "key") // should not panic
-}
-
-func init() {
-	_ = os.MkdirAll(os.TempDir(), 0700)
 }

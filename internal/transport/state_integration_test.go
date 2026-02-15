@@ -18,98 +18,135 @@ import (
 	"micelio/internal/transport"
 )
 
+// --- Integration test helpers ---
+
+// stateTestNode wraps all components needed for a mesh node in state tests.
+type stateTestNode struct {
+	id     *identity.Identity
+	hub    *partyline.Hub
+	mgr    *transport.Manager
+	ctx    context.Context //nolint:containedctx // acceptable in test helpers
+	cancel context.CancelFunc
+}
+
+func newStateTestNode(t *testing.T, name string) *stateTestNode {
+	t.Helper()
+	id, err := identity.Load(t.TempDir())
+	if err != nil {
+		t.Fatalf("identity %s: %v", name, err)
+	}
+	hub := partyline.NewHub(name)
+	ctx, cancel := context.WithCancel(context.Background())
+	return &stateTestNode{id: id, hub: hub, ctx: ctx, cancel: cancel}
+}
+
+func (n *stateTestNode) start(t *testing.T, name string, bootstrap []string) {
+	t.Helper()
+	cfg := &config.Config{
+		Node: config.NodeConfig{Name: name},
+		Network: config.NetworkConfig{
+			Listen:            "127.0.0.1:0",
+			Bootstrap:         bootstrap,
+			ExchangeInterval:  noDiscovery,
+			DiscoveryInterval: noDiscovery,
+		},
+	}
+	mgr, err := transport.NewManager(cfg, n.id, n.hub, nil)
+	if err != nil {
+		t.Fatalf("manager %s: %v", name, err)
+	}
+	n.mgr = mgr
+	go n.hub.Run()
+	go func() { _ = mgr.Start(n.ctx) }()
+}
+
+func (n *stateTestNode) cleanup() {
+	if n.mgr != nil {
+		n.mgr.Stop()
+	}
+	n.cancel()
+	n.hub.Stop()
+}
+
+func waitAddr(t *testing.T, mgr *transport.Manager) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for mgr.Addr() == "" && time.Now().Before(deadline) {
+		time.Sleep(10 * time.Millisecond)
+	}
+	if mgr.Addr() == "" {
+		t.Fatal("manager did not bind")
+	}
+}
+
+func waitPeers(t *testing.T, managers ...*transport.Manager) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		ok := true
+		for _, m := range managers {
+			if m.PeerCount() == 0 {
+				ok = false
+				break
+			}
+		}
+		if ok {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatal("nodes not connected")
+}
+
+// startPair creates two nodes, starts them, and waits until they are connected.
+// nodeB is the listener, nodeA bootstraps to B.
+func startPair(t *testing.T) (a, b *stateTestNode) {
+	t.Helper()
+	b = newStateTestNode(t, "B")
+	b.start(t, "node-b", nil)
+	waitAddr(t, b.mgr)
+
+	a = newStateTestNode(t, "A")
+	a.start(t, "node-a", []string{b.mgr.Addr()})
+	waitPeers(t, a.mgr, b.mgr)
+	return a, b
+}
+
+func pollGet(t *testing.T, sm *state.Map, key, wantVal string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if e, ok := sm.Get(key); ok && string(e.Value) == wantVal {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("key %q did not converge to %q", key, wantVal)
+}
+
+func pollGone(t *testing.T, sm *state.Map, key string) {
+	t.Helper()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, ok := sm.Get(key); !ok {
+			return
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	t.Fatalf("key %q still present", key)
+}
+
+// --- Tests ---
+
 // TestStateSyncTwoNodes verifies that a /set on node A is visible on node B
 // after gossip propagation. Keys are namespaced by nodeID.
 func TestStateSyncTwoNodes(t *testing.T) {
 	logging.CaptureForTest()
-
-	type testNode struct {
-		id     *identity.Identity
-		hub    *partyline.Hub
-		mgr    *transport.Manager
-		ctx    context.Context
-		cancel context.CancelFunc
-	}
-
-	makeNode := func(name string) testNode {
-		id, err := identity.Load(t.TempDir())
-		if err != nil {
-			t.Fatalf("identity %s: %v", name, err)
-		}
-		hub := partyline.NewHub(name)
-		ctx, cancel := context.WithCancel(context.Background())
-		return testNode{id: id, hub: hub, ctx: ctx, cancel: cancel}
-	}
-
-	cleanup := func(n *testNode) {
-		if n.mgr != nil {
-			n.mgr.Stop()
-		}
-		n.cancel()
-		n.hub.Stop()
-	}
-
-	nodeA := makeNode("node-a")
-	nodeB := makeNode("node-b")
-	defer func() {
-		cleanup(&nodeB)
-		cleanup(&nodeA)
-	}()
-
-	// Start B (listener)
-	cfgB := &config.Config{
-		Node: config.NodeConfig{Name: "node-b"},
-		Network: config.NetworkConfig{
-			Listen:            "127.0.0.1:0",
-			ExchangeInterval:  noDiscovery,
-			DiscoveryInterval: noDiscovery,
-		},
-	}
-	mgrB, err := transport.NewManager(cfgB, nodeB.id, nodeB.hub, nil)
-	if err != nil {
-		t.Fatalf("manager B: %v", err)
-	}
-	nodeB.mgr = mgrB
-	go nodeB.hub.Run()
-	go func() { _ = mgrB.Start(nodeB.ctx) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for mgrB.Addr() == "" && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Start A (bootstraps to B)
-	cfgA := &config.Config{
-		Node: config.NodeConfig{Name: "node-a"},
-		Network: config.NetworkConfig{
-			Listen:            "127.0.0.1:0",
-			Bootstrap:         []string{mgrB.Addr()},
-			ExchangeInterval:  noDiscovery,
-			DiscoveryInterval: noDiscovery,
-		},
-	}
-	mgrA, err := transport.NewManager(cfgA, nodeA.id, nodeA.hub, nil)
-	if err != nil {
-		t.Fatalf("manager A: %v", err)
-	}
-	nodeA.mgr = mgrA
-	go nodeA.hub.Run()
-	go func() { _ = mgrA.Start(nodeA.ctx) }()
-
-	// Wait for connection
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if mgrA.PeerCount() > 0 && mgrB.PeerCount() > 0 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if mgrA.PeerCount() == 0 {
-		t.Fatal("nodes not connected")
-	}
+	a, b := startPair(t)
+	defer func() { b.cleanup(); a.cleanup() }()
 
 	// Set on A (subkey "color" → full key "<nodeA_ID>/color")
-	stateA := mgrA.StateMap()
+	stateA := a.mgr.StateMap()
 	entry, ok, err := stateA.Set("color", []byte("blue"))
 	if err != nil {
 		t.Fatalf("Set error: %v", err)
@@ -122,26 +159,21 @@ func TestStateSyncTwoNodes(t *testing.T) {
 	}
 
 	// Poll B until it has the value (using full key from A's namespace)
-	fullKey := nodeA.id.NodeID + "/color"
-	stateB := mgrB.StateMap()
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if e, found := stateB.Get(fullKey); found && string(e.Value) == "blue" {
-			if e.LamportTs != entry.LamportTs {
-				t.Fatalf("B LamportTs = %d, want %d", e.LamportTs, entry.LamportTs)
-			}
-			if e.NodeID != nodeA.id.NodeID {
-				t.Fatalf("B NodeID = %q, want %q", e.NodeID, nodeA.id.NodeID)
-			}
-			// Verify the entry signature is valid after gossip propagation
-			if !state.VerifyEntry(e) {
-				t.Fatal("entry signature invalid after gossip propagation")
-			}
-			return // success
-		}
-		time.Sleep(50 * time.Millisecond)
+	fullKey := a.id.NodeID + "/color"
+	stateB := b.mgr.StateMap()
+	pollGet(t, stateB, fullKey, "blue")
+
+	// Verify entry details
+	got, _ := stateB.Get(fullKey)
+	if got.LamportTs != entry.LamportTs {
+		t.Fatalf("B LamportTs = %d, want %d", got.LamportTs, entry.LamportTs)
 	}
-	t.Fatal("B did not receive state update from A")
+	if got.NodeID != a.id.NodeID {
+		t.Fatalf("B NodeID = %q, want %q", got.NodeID, a.id.NodeID)
+	}
+	if !state.VerifyEntry(got) {
+		t.Fatal("entry signature invalid after gossip propagation")
+	}
 }
 
 // TestStateConflictDeterministicWinner verifies that LWW convergence works
@@ -197,110 +229,26 @@ func TestStateConflictDeterministicWinner(t *testing.T) {
 func TestStateSyncOnConnect(t *testing.T) {
 	logging.CaptureForTest()
 
-	type testNode struct {
-		id     *identity.Identity
-		hub    *partyline.Hub
-		mgr    *transport.Manager
-		ctx    context.Context
-		cancel context.CancelFunc
-	}
+	// Start A alone and set state BEFORE B connects
+	a := newStateTestNode(t, "A")
+	a.start(t, "node-a", nil)
+	defer a.cleanup()
+	waitAddr(t, a.mgr)
 
-	cleanup := func(n *testNode) {
-		if n.mgr != nil {
-			n.mgr.Stop()
-		}
-		n.cancel()
-		n.hub.Stop()
-	}
-
-	// Start A and set state BEFORE B connects
-	idA, err := identity.Load(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	hubA := partyline.NewHub("node-a")
-	ctxA, cancelA := context.WithCancel(context.Background())
-	nodeA := testNode{id: idA, hub: hubA, ctx: ctxA, cancel: cancelA}
-	defer cleanup(&nodeA)
-
-	cfgA := &config.Config{
-		Node: config.NodeConfig{Name: "node-a"},
-		Network: config.NetworkConfig{
-			Listen:            "127.0.0.1:0",
-			ExchangeInterval:  noDiscovery,
-			DiscoveryInterval: noDiscovery,
-		},
-	}
-	mgrA, err := transport.NewManager(cfgA, idA, hubA, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nodeA.mgr = mgrA
-	go hubA.Run()
-	go func() { _ = mgrA.Start(ctxA) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for mgrA.Addr() == "" && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Set state on A before B connects (subkeys auto-prefixed with nodeA ID)
-	mgrA.StateMap().Set("x", []byte("1")) //nolint:errcheck
-	mgrA.StateMap().Set("y", []byte("2")) //nolint:errcheck
+	// Set state on A before B connects
+	a.mgr.StateMap().Set("x", []byte("1")) //nolint:errcheck
+	a.mgr.StateMap().Set("y", []byte("2")) //nolint:errcheck
 
 	// Now start B and connect to A
-	idB, err := identity.Load(t.TempDir())
-	if err != nil {
-		t.Fatal(err)
-	}
-	hubB := partyline.NewHub("node-b")
-	ctxB, cancelB := context.WithCancel(context.Background())
-	nodeB := testNode{id: idB, hub: hubB, ctx: ctxB, cancel: cancelB}
-	defer cleanup(&nodeB)
-
-	cfgB := &config.Config{
-		Node: config.NodeConfig{Name: "node-b"},
-		Network: config.NetworkConfig{
-			Listen:            "127.0.0.1:0",
-			Bootstrap:         []string{mgrA.Addr()},
-			ExchangeInterval:  noDiscovery,
-			DiscoveryInterval: noDiscovery,
-		},
-	}
-	mgrB, err := transport.NewManager(cfgB, idB, hubB, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
-	nodeB.mgr = mgrB
-	go hubB.Run()
-	go func() { _ = mgrB.Start(ctxB) }()
-
-	// Wait for connection
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if mgrB.PeerCount() > 0 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if mgrB.PeerCount() == 0 {
-		t.Fatal("B not connected to A")
-	}
+	b := newStateTestNode(t, "B")
+	b.start(t, "node-b", []string{a.mgr.Addr()})
+	defer b.cleanup()
+	waitPeers(t, b.mgr)
 
 	// Poll B for both keys (using A's namespace prefix)
-	keyX := idA.NodeID + "/x"
-	keyY := idA.NodeID + "/y"
-	stateB := mgrB.StateMap()
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		ex, okX := stateB.Get(keyX)
-		ey, okY := stateB.Get(keyY)
-		if okX && okY && string(ex.Value) == "1" && string(ey.Value) == "2" {
-			return // success
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatal("B did not receive A's pre-existing state via sync")
+	stateB := b.mgr.StateMap()
+	pollGet(t, stateB, a.id.NodeID+"/x", "1")
+	pollGet(t, stateB, a.id.NodeID+"/y", "2")
 }
 
 // TestStatePersistenceRestart verifies that state survives a node restart
@@ -353,14 +301,12 @@ func TestStatePersistenceRestart(t *testing.T) {
 		t.Fatalf("Len() = %d, want 2", m2.Len())
 	}
 
-	colorKey := nodeID + "/color"
-	got, ok := m2.Get(colorKey)
+	got, ok := m2.Get(nodeID + "/color")
 	if !ok || string(got.Value) != "red" {
 		t.Fatalf("color = %q, want %q", got.Value, "red")
 	}
 
-	sizeKey := nodeID + "/size"
-	got, ok = m2.Get(sizeKey)
+	got, ok = m2.Get(nodeID + "/size")
 	if !ok || string(got.Value) != "large" {
 		t.Fatalf("size = %q, want %q", got.Value, "large")
 	}
@@ -376,119 +322,17 @@ func TestStatePersistenceRestart(t *testing.T) {
 // Get on node B to return not-found after gossip propagation.
 func TestDeletePropagatesTwoNodes(t *testing.T) {
 	logging.CaptureForTest()
-
-	type testNode struct {
-		id     *identity.Identity
-		hub    *partyline.Hub
-		mgr    *transport.Manager
-		ctx    context.Context
-		cancel context.CancelFunc
-	}
-
-	makeNode := func(name string) testNode {
-		id, err := identity.Load(t.TempDir())
-		if err != nil {
-			t.Fatalf("identity %s: %v", name, err)
-		}
-		hub := partyline.NewHub(name)
-		ctx, cancel := context.WithCancel(context.Background())
-		return testNode{id: id, hub: hub, ctx: ctx, cancel: cancel}
-	}
-
-	cleanup := func(n *testNode) {
-		if n.mgr != nil {
-			n.mgr.Stop()
-		}
-		n.cancel()
-		n.hub.Stop()
-	}
-
-	nodeA := makeNode("node-a")
-	nodeB := makeNode("node-b")
-	defer func() {
-		cleanup(&nodeB)
-		cleanup(&nodeA)
-	}()
-
-	// Start B (listener)
-	cfgB := &config.Config{
-		Node: config.NodeConfig{Name: "node-b"},
-		Network: config.NetworkConfig{
-			Listen:            "127.0.0.1:0",
-			ExchangeInterval:  noDiscovery,
-			DiscoveryInterval: noDiscovery,
-		},
-	}
-	mgrB, err := transport.NewManager(cfgB, nodeB.id, nodeB.hub, nil)
-	if err != nil {
-		t.Fatalf("manager B: %v", err)
-	}
-	nodeB.mgr = mgrB
-	go nodeB.hub.Run()
-	go func() { _ = mgrB.Start(nodeB.ctx) }()
-
-	deadline := time.Now().Add(5 * time.Second)
-	for mgrB.Addr() == "" && time.Now().Before(deadline) {
-		time.Sleep(10 * time.Millisecond)
-	}
-
-	// Start A (bootstraps to B)
-	cfgA := &config.Config{
-		Node: config.NodeConfig{Name: "node-a"},
-		Network: config.NetworkConfig{
-			Listen:            "127.0.0.1:0",
-			Bootstrap:         []string{mgrB.Addr()},
-			ExchangeInterval:  noDiscovery,
-			DiscoveryInterval: noDiscovery,
-		},
-	}
-	mgrA, err := transport.NewManager(cfgA, nodeA.id, nodeA.hub, nil)
-	if err != nil {
-		t.Fatalf("manager A: %v", err)
-	}
-	nodeA.mgr = mgrA
-	go nodeA.hub.Run()
-	go func() { _ = mgrA.Start(nodeA.ctx) }()
-
-	// Wait for connection
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if mgrA.PeerCount() > 0 && mgrB.PeerCount() > 0 {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if mgrA.PeerCount() == 0 {
-		t.Fatal("nodes not connected")
-	}
+	a, b := startPair(t)
+	defer func() { b.cleanup(); a.cleanup() }()
 
 	// Set on A, wait for B to receive it
-	stateA := mgrA.StateMap()
+	stateA := a.mgr.StateMap()
 	stateA.Set("color", []byte("blue")) //nolint:errcheck
 
-	colorKey := nodeA.id.NodeID + "/color"
-	stateB := mgrB.StateMap()
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, found := stateB.Get(colorKey); found {
-			break
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	if _, found := stateB.Get(colorKey); !found {
-		t.Fatal("B did not receive Set from A")
-	}
+	colorKey := a.id.NodeID + "/color"
+	pollGet(t, b.mgr.StateMap(), colorKey, "blue")
 
-	// Delete on A
+	// Delete on A, wait for B to see it gone
 	stateA.Delete("color") //nolint:errcheck
-
-	// Poll B until it no longer has the value
-	deadline = time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, found := stateB.Get(colorKey); !found {
-			return // success
-		}
-		time.Sleep(50 * time.Millisecond)
-	}
-	t.Fatal("B did not receive Delete from A")
+	pollGone(t, b.mgr.StateMap(), colorKey)
 }
