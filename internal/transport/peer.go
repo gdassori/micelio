@@ -23,11 +23,14 @@ import (
 
 // Message type constants.
 const (
-	MsgTypePeerHello    uint32 = 1
-	MsgTypePeerHelloAck uint32 = 2
-	MsgTypeChat         uint32 = 3
-	MsgTypePeerExchange uint32 = 4
-	MsgTypeKeepalive    uint32 = 5
+	MsgTypePeerHello         uint32 = 1
+	MsgTypePeerHelloAck      uint32 = 2
+	MsgTypeChat              uint32 = 3
+	MsgTypePeerExchange      uint32 = 4
+	MsgTypeKeepalive         uint32 = 5
+	MsgTypeStateUpdate       uint32 = 6 // gossip-relayed state change
+	MsgTypeStateSyncRequest  uint32 = 7 // direct peer-to-peer
+	MsgTypeStateSyncResponse uint32 = 8 // direct peer-to-peer
 
 	seenTTL     = 5 * time.Minute
 	seenCleanup = 1 * time.Minute
@@ -57,8 +60,12 @@ type Peer struct {
 	onPeerExchange func(nodeID string, infos []*pb.PeerInfo)
 
 	// Callback for gossip-eligible messages (set by Manager).
-	// All msg_types except PeerHello/HelloAck/PeerExchange are routed here.
+	// All msg_types except PeerHello/HelloAck/PeerExchange/StateSync are routed here.
 	onGossipMessage func(fromPeerID string, env *pb.Envelope)
+
+	// Callbacks for state sync messages (set by Manager).
+	onStateSyncRequest  func(fromPeerID string, known map[string]uint64)
+	onStateSyncResponse func(fromPeerID string, entries []*pb.StateEntry)
 
 	sendCh chan []byte // framed envelope bytes ready to write
 	done   chan struct{}
@@ -277,6 +284,50 @@ func (p *Peer) recvLoop() error {
 				continue
 			}
 			p.handlePeerExchange(&env)
+
+		case MsgTypeStateSyncRequest:
+			// Direct peer-to-peer: per-peer dedup + signature check.
+			if p.isDuplicate(env.MessageId) {
+				continue
+			}
+			if !verifySignature(&env, p.edPubKey) {
+				tlog.Warn("invalid signature on state_sync_request", "peer", formatNodeIDShort(p.NodeID), "msg_id", env.MessageId)
+				continue
+			}
+			if env.SenderId != p.NodeID {
+				tlog.Warn("sender_id mismatch on state_sync_request", "peer", formatNodeIDShort(p.NodeID), "claimed", env.SenderId)
+				continue
+			}
+			var req pb.StateSyncRequest
+			if err := proto.Unmarshal(env.Payload, &req); err != nil {
+				tlog.Error("unmarshal state_sync_request", "peer", formatNodeIDShort(p.NodeID), "err", err)
+				continue
+			}
+			if p.onStateSyncRequest != nil {
+				p.onStateSyncRequest(p.NodeID, req.Known)
+			}
+
+		case MsgTypeStateSyncResponse:
+			// Direct peer-to-peer: per-peer dedup + signature check.
+			if p.isDuplicate(env.MessageId) {
+				continue
+			}
+			if !verifySignature(&env, p.edPubKey) {
+				tlog.Warn("invalid signature on state_sync_response", "peer", formatNodeIDShort(p.NodeID), "msg_id", env.MessageId)
+				continue
+			}
+			if env.SenderId != p.NodeID {
+				tlog.Warn("sender_id mismatch on state_sync_response", "peer", formatNodeIDShort(p.NodeID), "claimed", env.SenderId)
+				continue
+			}
+			var resp pb.StateSyncResponse
+			if err := proto.Unmarshal(env.Payload, &resp); err != nil {
+				tlog.Error("unmarshal state_sync_response", "peer", formatNodeIDShort(p.NodeID), "err", err)
+				continue
+			}
+			if p.onStateSyncResponse != nil {
+				p.onStateSyncResponse(p.NodeID, resp.Entries)
+			}
 
 		case MsgTypePeerHello, MsgTypePeerHelloAck:
 			// Handshake messages are point-to-point only; never gossip-relay them.

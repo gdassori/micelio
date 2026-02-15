@@ -58,3 +58,34 @@ message PeerInfo {
 message PeerExchange {
     repeated PeerInfo peers = 1;
 }
+
+// StateEntry represents a single key-value pair with LWW metadata.
+// Each entry is self-authenticating: it carries the author's ED25519 public key
+// and a signature over all semantic fields. Nodes verify before accepting.
+message StateEntry {
+    string key           = 1;
+    bytes  value         = 2;
+    uint64 lamport_ts    = 3;  // per-entry Lamport clock
+    string node_id       = 4;  // originator node_id = sha256(author_pubkey)
+    bool   deleted       = 5;  // tombstone marker for soft-delete
+    bytes  signature     = 6;  // ED25519 signature over (key, value, lamport_ts, node_id, deleted)
+    bytes  author_pubkey = 7;  // raw 32-byte ED25519 public key of author
+}
+
+// StateUpdate carries a single state change (msg_type=6, gossip-relayed).
+message StateUpdate {
+    StateEntry entry = 1;
+}
+
+// StateSyncRequest asks a peer for state entries it is missing (msg_type=7, direct).
+// The known map is a version vector: for each nodeID, the highest lamport_ts
+// the requester already has. The responder sends only entries newer than this.
+// An empty map means "send everything" (fresh node).
+message StateSyncRequest {
+    map<string, uint64> known = 1;
+}
+
+// StateSyncResponse carries the delta state entries (msg_type=8, direct).
+message StateSyncResponse {
+    repeated StateEntry entries = 1;
+}

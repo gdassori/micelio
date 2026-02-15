@@ -133,6 +133,11 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Register state commands if transport manager has a state map.
+	if mgr != nil {
+		registerStateCommands(sshServer.Commands(), mgr.StateMap(), id.NodeID)
+	}
+
 	go func() {
 		if err := sshServer.Start(ctx); err != nil {
 			slog.Error("fatal: ssh", "err", err)
