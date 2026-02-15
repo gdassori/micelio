@@ -64,7 +64,7 @@ type Peer struct {
 	onGossipMessage func(fromPeerID string, env *pb.Envelope)
 
 	// Callbacks for state sync messages (set by Manager).
-	onStateSyncRequest  func(fromPeerID string)
+	onStateSyncRequest  func(fromPeerID string, known map[string]uint64)
 	onStateSyncResponse func(fromPeerID string, entries []*pb.StateEntry)
 
 	sendCh chan []byte // framed envelope bytes ready to write
@@ -298,8 +298,13 @@ func (p *Peer) recvLoop() error {
 				tlog.Warn("sender_id mismatch on state_sync_request", "peer", formatNodeIDShort(p.NodeID), "claimed", env.SenderId)
 				continue
 			}
+			var req pb.StateSyncRequest
+			if err := proto.Unmarshal(env.Payload, &req); err != nil {
+				tlog.Error("unmarshal state_sync_request", "peer", formatNodeIDShort(p.NodeID), "err", err)
+				continue
+			}
 			if p.onStateSyncRequest != nil {
-				p.onStateSyncRequest(p.NodeID)
+				p.onStateSyncRequest(p.NodeID, req.Known)
 			}
 
 		case MsgTypeStateSyncResponse:

@@ -135,7 +135,7 @@ func main() {
 
 	// Register state commands if transport manager has a state map.
 	if mgr != nil {
-		registerStateCommands(sshServer.Commands(), mgr.StateMap())
+		registerStateCommands(sshServer.Commands(), mgr.StateMap(), id.NodeID)
 	}
 
 	go func() {

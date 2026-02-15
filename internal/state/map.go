@@ -1,18 +1,20 @@
 package state
 
 import (
+	"crypto/ed25519"
 	"errors"
 	"sync"
+	"time"
 
 	"micelio/internal/logging"
 )
 
 // Limits to prevent resource exhaustion from malicious peers.
 const (
-	MaxKeyLen        = 256        // max key length in bytes
-	MaxValueLen      = 4096       // max value length in bytes
-	MaxStateEntries  = 10_000     // max entries in the state map
-	MaxSafeLamportTs = 1 << 62   // reject timestamps above this to prevent clock poisoning
+	MaxKeyLen        = 256      // max key length in bytes
+	MaxValueLen      = 4096     // max value length in bytes
+	MaxStateEntries  = 10_000   // max entries in the state map
+	MaxSafeLamportTs = 1 << 62 // reject timestamps above this to prevent clock poisoning
 )
 
 var (
@@ -25,11 +27,16 @@ var (
 var logger = logging.For("state")
 
 // Entry is a single state entry with LWW metadata.
+// Each entry is self-authenticating: it carries the author's public key
+// and a signature. Nodes verify before accepting remote entries.
 type Entry struct {
-	Key       string
-	Value     []byte
-	LamportTs uint64
-	NodeID    string
+	Key          string
+	Value        []byte
+	LamportTs    uint64
+	NodeID       string
+	Deleted      bool   // tombstone marker
+	Signature    []byte // ED25519 signature over semantic fields
+	AuthorPubkey []byte // 32-byte ED25519 public key of author
 }
 
 // Wins returns true if this entry wins over other according to LWW rules:
@@ -47,23 +54,28 @@ type ChangeHandler func(entry Entry)
 
 // Map is a thread-safe in-memory LWW state map.
 type Map struct {
-	mu       sync.RWMutex
-	entries  map[string]Entry
-	clock    *LamportClock
-	localID  string
-	onChange ChangeHandler
+	mu                 sync.RWMutex
+	entries            map[string]Entry
+	tombstoneFirstSeen map[string]time.Time // key → time tombstone was first seen locally
+	clock              *LamportClock
+	localID            string
+	privKey            ed25519.PrivateKey
+	onChange           ChangeHandler
 }
 
 // NewMap creates a new state map for the given local node ID.
-func NewMap(localID string) *Map {
+// The private key is used to sign entries created by Set/Delete.
+func NewMap(localID string, privKey ed25519.PrivateKey) *Map {
 	return &Map{
-		entries: make(map[string]Entry),
-		clock:   &LamportClock{},
-		localID: localID,
+		entries:            make(map[string]Entry),
+		tombstoneFirstSeen: make(map[string]time.Time),
+		clock:              &LamportClock{},
+		localID:            localID,
+		privKey:            privKey,
 	}
 }
 
-// SetChangeHandler sets the callback invoked when a local Set wins LWW.
+// SetChangeHandler sets the callback invoked when a local Set/Delete wins LWW.
 // Must be called before any concurrent access.
 func (m *Map) SetChangeHandler(h ChangeHandler) {
 	m.onChange = h
@@ -74,11 +86,14 @@ func (m *Map) Clock() *LamportClock {
 	return m.clock
 }
 
-// Set creates or updates a local entry. Ticks the Lamport clock,
-// applies LWW, and if the write wins, calls the change handler.
+// Set creates or updates a local entry. The subkey is auto-prefixed with
+// the local node ID to form the full key (<nodeID>/<subkey>).
+// Ticks the Lamport clock, signs the entry, applies LWW, and if the
+// write wins, calls the change handler.
 // Returns an error if key or value exceeds size limits.
-func (m *Map) Set(key string, value []byte) (Entry, bool, error) {
-	if len(key) > MaxKeyLen {
+func (m *Map) Set(subkey string, value []byte) (Entry, bool, error) {
+	fullKey := m.localID + "/" + subkey
+	if len(fullKey) > MaxKeyLen {
 		return Entry{}, false, ErrKeyTooLong
 	}
 	if len(value) > MaxValueLen {
@@ -86,19 +101,48 @@ func (m *Map) Set(key string, value []byte) (Entry, bool, error) {
 	}
 	ts := m.clock.Tick()
 	entry := Entry{
-		Key:       key,
+		Key:       fullKey,
 		Value:     value,
 		LamportTs: ts,
 		NodeID:    m.localID,
 	}
+	SignEntry(&entry, m.privKey)
+	return entry, m.merge(entry, true), nil
+}
+
+// Delete creates a tombstone for the given subkey. The subkey is auto-prefixed
+// with the local node ID to form the full key (<nodeID>/<subkey>).
+// Ticks the Lamport clock, signs the entry, applies LWW, and if the
+// delete wins, calls the change handler.
+// Returns an error if key exceeds size limits.
+func (m *Map) Delete(subkey string) (Entry, bool, error) {
+	fullKey := m.localID + "/" + subkey
+	if len(fullKey) > MaxKeyLen {
+		return Entry{}, false, ErrKeyTooLong
+	}
+	ts := m.clock.Tick()
+	entry := Entry{
+		Key:       fullKey,
+		LamportTs: ts,
+		NodeID:    m.localID,
+		Deleted:   true,
+	}
+	SignEntry(&entry, m.privKey)
 	return entry, m.merge(entry, true), nil
 }
 
 // Merge applies a remote entry using LWW conflict resolution.
+// Verifies the entry's signature and namespace ownership before accepting.
 // Witnesses the entry's Lamport timestamp to advance the local clock.
 // Returns true if the incoming entry won and was applied.
-// Rejects entries that exceed size limits or have unsafe timestamps.
+// Rejects entries that fail signature verification, exceed size limits,
+// or have unsafe timestamps.
 func (m *Map) Merge(entry Entry) bool {
+	if !VerifyEntry(entry) {
+		logger.Warn("rejecting entry with invalid signature or namespace",
+			"key", entry.Key, "node_id", entry.NodeID)
+		return false
+	}
 	if len(entry.Key) > MaxKeyLen || len(entry.Value) > MaxValueLen {
 		logger.Warn("rejecting oversized entry", "key_len", len(entry.Key), "value_len", len(entry.Value))
 		return false
@@ -125,6 +169,16 @@ func (m *Map) merge(entry Entry, notify bool) bool {
 		return false
 	}
 	m.entries[entry.Key] = entry
+
+	// Track tombstone first-seen time for GC.
+	if entry.Deleted {
+		if _, tracked := m.tombstoneFirstSeen[entry.Key]; !tracked {
+			m.tombstoneFirstSeen[entry.Key] = time.Now()
+		}
+	} else {
+		// A live entry overwrites a tombstone — stop tracking.
+		delete(m.tombstoneFirstSeen, entry.Key)
+	}
 	m.mu.Unlock()
 
 	if notify && m.onChange != nil {
@@ -133,15 +187,19 @@ func (m *Map) merge(entry Entry, notify bool) bool {
 	return true
 }
 
-// Get returns the entry for a key, or false if not found.
+// Get returns the entry for a key, or false if not found or deleted.
 func (m *Map) Get(key string) (Entry, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	e, ok := m.entries[key]
-	return e, ok
+	if !ok || e.Deleted {
+		return Entry{}, false
+	}
+	return e, true
 }
 
-// Snapshot returns a copy of all entries.
+// Snapshot returns a copy of all entries, including tombstones.
+// Tombstones must be included for state sync to propagate deletes.
 func (m *Map) Snapshot() []Entry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -152,9 +210,71 @@ func (m *Map) Snapshot() []Entry {
 	return entries
 }
 
-// Len returns the number of entries in the map.
+// Digest returns a version vector summarizing the state map:
+// for each nodeID, the maximum LamportTs of any entry from that node.
+// Used by delta state sync to avoid sending entries the peer already has.
+func (m *Map) Digest() map[string]uint64 {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	d := make(map[string]uint64)
+	for _, e := range m.entries {
+		if e.LamportTs > d[e.NodeID] {
+			d[e.NodeID] = e.LamportTs
+		}
+	}
+	return d
+}
+
+// SnapshotDelta returns only entries the remote peer is missing, based on
+// the version vector digest it provided. An entry is included if its
+// LamportTs is strictly greater than known[entry.NodeID]. If known is
+// nil or empty, all entries are returned (equivalent to Snapshot).
+func (m *Map) SnapshotDelta(known map[string]uint64) []Entry {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	var delta []Entry
+	for _, e := range m.entries {
+		if e.LamportTs > known[e.NodeID] {
+			delta = append(delta, e)
+		}
+	}
+	return delta
+}
+
+// Len returns the number of entries in the map, including tombstones.
 func (m *Map) Len() int {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	return len(m.entries)
+}
+
+// GC removes tombstones older than maxAge from the map.
+// Returns the keys that were removed (caller should delete from store).
+func (m *Map) GC(maxAge time.Duration) []string {
+	now := time.Now()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	var removed []string
+	for key, firstSeen := range m.tombstoneFirstSeen {
+		if now.Sub(firstSeen) >= maxAge {
+			delete(m.entries, key)
+			delete(m.tombstoneFirstSeen, key)
+			removed = append(removed, key)
+		}
+	}
+	if len(removed) > 0 {
+		logger.Info("tombstone GC", "removed", len(removed))
+	}
+	return removed
+}
+
+// RecordTombstone records the first-seen time of a tombstone entry.
+// Used by LoadFromStore to track tombstones loaded from disk.
+func (m *Map) RecordTombstone(key string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, tracked := m.tombstoneFirstSeen[key]; !tracked {
+		m.tombstoneFirstSeen[key] = time.Now()
+	}
 }

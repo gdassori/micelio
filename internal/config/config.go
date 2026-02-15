@@ -31,6 +31,7 @@ type Config struct {
 	SSH     SSHConfig     `toml:"ssh"`
 	Network NetworkConfig `toml:"network"`
 	Logging LoggingConfig `toml:"logging"`
+	State   StateConfig   `toml:"state"`
 }
 
 type LoggingConfig struct {
@@ -57,6 +58,11 @@ type NetworkConfig struct {
 	DiscoveryInterval Duration `toml:"discovery_interval"` // discovery scan period; 0 → 10s default
 }
 
+type StateConfig struct {
+	TombstoneTTL Duration `toml:"tombstone_ttl"` // how long tombstones live before GC; 0 → 24h default
+	GCInterval   Duration `toml:"gc_interval"`   // GC scan period; 0 → 1h default
+}
+
 // Defaults returns a Config with sane defaults.
 func Defaults() *Config {
 	hostname, _ := os.Hostname()
@@ -75,6 +81,10 @@ func Defaults() *Config {
 			MaxPeers:          15,
 			ExchangeInterval:  Duration{30 * time.Second},
 			DiscoveryInterval: Duration{10 * time.Second},
+		},
+		State: StateConfig{
+			TombstoneTTL: Duration{24 * time.Hour},
+			GCInterval:   Duration{1 * time.Hour},
 		},
 	}
 }

@@ -479,12 +479,17 @@ func (x *PeerExchange) GetPeers() []*PeerInfo {
 }
 
 // StateEntry represents a single key-value pair with LWW metadata.
+// Each entry is self-authenticating: it carries the author's ED25519 public key
+// and a signature over all semantic fields. Nodes verify before accepting.
 type StateEntry struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Key           string                 `protobuf:"bytes,1,opt,name=key,proto3" json:"key,omitempty"`
 	Value         []byte                 `protobuf:"bytes,2,opt,name=value,proto3" json:"value,omitempty"`
-	LamportTs     uint64                 `protobuf:"varint,3,opt,name=lamport_ts,json=lamportTs,proto3" json:"lamport_ts,omitempty"` // per-entry Lamport clock
-	NodeId        string                 `protobuf:"bytes,4,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`           // originator node_id (for tie-breaking)
+	LamportTs     uint64                 `protobuf:"varint,3,opt,name=lamport_ts,json=lamportTs,proto3" json:"lamport_ts,omitempty"`         // per-entry Lamport clock
+	NodeId        string                 `protobuf:"bytes,4,opt,name=node_id,json=nodeId,proto3" json:"node_id,omitempty"`                   // originator node_id = sha256(author_pubkey)
+	Deleted       bool                   `protobuf:"varint,5,opt,name=deleted,proto3" json:"deleted,omitempty"`                              // tombstone marker for soft-delete
+	Signature     []byte                 `protobuf:"bytes,6,opt,name=signature,proto3" json:"signature,omitempty"`                           // ED25519 signature over (key, value, lamport_ts, node_id, deleted)
+	AuthorPubkey  []byte                 `protobuf:"bytes,7,opt,name=author_pubkey,json=authorPubkey,proto3" json:"author_pubkey,omitempty"` // raw 32-byte ED25519 public key of author
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -547,6 +552,27 @@ func (x *StateEntry) GetNodeId() string {
 	return ""
 }
 
+func (x *StateEntry) GetDeleted() bool {
+	if x != nil {
+		return x.Deleted
+	}
+	return false
+}
+
+func (x *StateEntry) GetSignature() []byte {
+	if x != nil {
+		return x.Signature
+	}
+	return nil
+}
+
+func (x *StateEntry) GetAuthorPubkey() []byte {
+	if x != nil {
+		return x.AuthorPubkey
+	}
+	return nil
+}
+
 // StateUpdate carries a single state change (msg_type=6, gossip-relayed).
 type StateUpdate struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -592,9 +618,13 @@ func (x *StateUpdate) GetEntry() *StateEntry {
 	return nil
 }
 
-// StateSyncRequest asks a peer to send its full state (msg_type=7, direct).
+// StateSyncRequest asks a peer for state entries it is missing (msg_type=7, direct).
+// The known map is a version vector: for each nodeID, the highest lamport_ts
+// the requester already has. The responder sends only entries newer than this.
+// An empty map means "send everything" (fresh node).
 type StateSyncRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
+	Known         map[string]uint64      `protobuf:"bytes,1,rep,name=known,proto3" json:"known,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"varint,2,opt,name=value"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -629,7 +659,14 @@ func (*StateSyncRequest) Descriptor() ([]byte, []int) {
 	return file_proto_micelio_proto_rawDescGZIP(), []int{8}
 }
 
-// StateSyncResponse carries the full state snapshot (msg_type=8, direct).
+func (x *StateSyncRequest) GetKnown() map[string]uint64 {
+	if x != nil {
+		return x.Known
+	}
+	return nil
+}
+
+// StateSyncResponse carries the delta state entries (msg_type=8, direct).
 type StateSyncResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	Entries       []*StateEntry          `protobuf:"bytes,1,rep,name=entries,proto3" json:"entries,omitempty"`
@@ -717,17 +754,25 @@ const file_proto_micelio_proto_rawDesc = "" +
 	"\x0eed25519_pubkey\x18\x04 \x01(\fR\red25519Pubkey\x12\x1b\n" +
 	"\tlast_seen\x18\x05 \x01(\x04R\blastSeen\"7\n" +
 	"\fPeerExchange\x12'\n" +
-	"\x05peers\x18\x01 \x03(\v2\x11.micelio.PeerInfoR\x05peers\"l\n" +
+	"\x05peers\x18\x01 \x03(\v2\x11.micelio.PeerInfoR\x05peers\"\xc9\x01\n" +
 	"\n" +
 	"StateEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
 	"\x05value\x18\x02 \x01(\fR\x05value\x12\x1d\n" +
 	"\n" +
 	"lamport_ts\x18\x03 \x01(\x04R\tlamportTs\x12\x17\n" +
-	"\anode_id\x18\x04 \x01(\tR\x06nodeId\"8\n" +
+	"\anode_id\x18\x04 \x01(\tR\x06nodeId\x12\x18\n" +
+	"\adeleted\x18\x05 \x01(\bR\adeleted\x12\x1c\n" +
+	"\tsignature\x18\x06 \x01(\fR\tsignature\x12#\n" +
+	"\rauthor_pubkey\x18\a \x01(\fR\fauthorPubkey\"8\n" +
 	"\vStateUpdate\x12)\n" +
-	"\x05entry\x18\x01 \x01(\v2\x13.micelio.StateEntryR\x05entry\"\x12\n" +
-	"\x10StateSyncRequest\"B\n" +
+	"\x05entry\x18\x01 \x01(\v2\x13.micelio.StateEntryR\x05entry\"\x88\x01\n" +
+	"\x10StateSyncRequest\x12:\n" +
+	"\x05known\x18\x01 \x03(\v2$.micelio.StateSyncRequest.KnownEntryR\x05known\x1a8\n" +
+	"\n" +
+	"KnownEntry\x12\x10\n" +
+	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
+	"\x05value\x18\x02 \x01(\x04R\x05value:\x028\x01\"B\n" +
 	"\x11StateSyncResponse\x12-\n" +
 	"\aentries\x18\x01 \x03(\v2\x13.micelio.StateEntryR\aentriesB\x13Z\x11micelio/pkg/protob\x06proto3"
 
@@ -743,7 +788,7 @@ func file_proto_micelio_proto_rawDescGZIP() []byte {
 	return file_proto_micelio_proto_rawDescData
 }
 
-var file_proto_micelio_proto_msgTypes = make([]protoimpl.MessageInfo, 10)
+var file_proto_micelio_proto_msgTypes = make([]protoimpl.MessageInfo, 11)
 var file_proto_micelio_proto_goTypes = []any{
 	(*Envelope)(nil),          // 0: micelio.Envelope
 	(*PeerHello)(nil),         // 1: micelio.PeerHello
@@ -755,16 +800,18 @@ var file_proto_micelio_proto_goTypes = []any{
 	(*StateUpdate)(nil),       // 7: micelio.StateUpdate
 	(*StateSyncRequest)(nil),  // 8: micelio.StateSyncRequest
 	(*StateSyncResponse)(nil), // 9: micelio.StateSyncResponse
+	nil,                       // 10: micelio.StateSyncRequest.KnownEntry
 }
 var file_proto_micelio_proto_depIdxs = []int32{
-	4, // 0: micelio.PeerExchange.peers:type_name -> micelio.PeerInfo
-	6, // 1: micelio.StateUpdate.entry:type_name -> micelio.StateEntry
-	6, // 2: micelio.StateSyncResponse.entries:type_name -> micelio.StateEntry
-	3, // [3:3] is the sub-list for method output_type
-	3, // [3:3] is the sub-list for method input_type
-	3, // [3:3] is the sub-list for extension type_name
-	3, // [3:3] is the sub-list for extension extendee
-	0, // [0:3] is the sub-list for field type_name
+	4,  // 0: micelio.PeerExchange.peers:type_name -> micelio.PeerInfo
+	6,  // 1: micelio.StateUpdate.entry:type_name -> micelio.StateEntry
+	10, // 2: micelio.StateSyncRequest.known:type_name -> micelio.StateSyncRequest.KnownEntry
+	6,  // 3: micelio.StateSyncResponse.entries:type_name -> micelio.StateEntry
+	4,  // [4:4] is the sub-list for method output_type
+	4,  // [4:4] is the sub-list for method input_type
+	4,  // [4:4] is the sub-list for extension type_name
+	4,  // [4:4] is the sub-list for extension extendee
+	0,  // [0:4] is the sub-list for field type_name
 }
 
 func init() { file_proto_micelio_proto_init() }
@@ -778,7 +825,7 @@ func file_proto_micelio_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_proto_micelio_proto_rawDesc), len(file_proto_micelio_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   10,
+			NumMessages:   11,
 			NumExtensions: 0,
 			NumServices:   0,
 		},

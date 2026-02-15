@@ -102,7 +102,7 @@ func NewManager(cfg *config.Config, id *identity.Identity, hub *partyline.Hub, s
 	mgr.gossip.KeyRing.Add(id.NodeID, id.PublicKey, gossip.TrustDirectlyVerified)
 
 	// Create the distributed state map and load persisted state.
-	stateMap := state.NewMap(id.NodeID)
+	stateMap := state.NewMap(id.NodeID, id.PrivateKey)
 	if err := stateMap.LoadFromStore(st); err != nil {
 		return nil, fmt.Errorf("loading state: %w", err)
 	}
@@ -112,10 +112,13 @@ func NewManager(cfg *config.Config, id *identity.Identity, hub *partyline.Hub, s
 	stateMap.SetChangeHandler(func(entry state.Entry) {
 		update := &pb.StateUpdate{
 			Entry: &pb.StateEntry{
-				Key:       entry.Key,
-				Value:     entry.Value,
-				LamportTs: entry.LamportTs,
-				NodeId:    entry.NodeID,
+				Key:          entry.Key,
+				Value:        entry.Value,
+				LamportTs:    entry.LamportTs,
+				NodeId:       entry.NodeID,
+				Deleted:      entry.Deleted,
+				Signature:    entry.Signature,
+				AuthorPubkey: entry.AuthorPubkey,
 			},
 		}
 		payload, err := proto.Marshal(update)
@@ -148,10 +151,13 @@ func NewManager(cfg *config.Config, id *identity.Identity, hub *partyline.Hub, s
 			return
 		}
 		entry := state.Entry{
-			Key:       update.Entry.Key,
-			Value:     update.Entry.Value,
-			LamportTs: update.Entry.LamportTs,
-			NodeID:    update.Entry.NodeId,
+			Key:          update.Entry.Key,
+			Value:        update.Entry.Value,
+			LamportTs:    update.Entry.LamportTs,
+			NodeID:       update.Entry.NodeId,
+			Deleted:      update.Entry.Deleted,
+			Signature:    update.Entry.Signature,
+			AuthorPubkey: update.Entry.AuthorPubkey,
 		}
 		if mgr.stateMap.Merge(entry) {
 			mgr.enqueuePersist(entry)
@@ -186,6 +192,9 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	if m.store != nil {
 		go m.persistLoop()
+	}
+	if m.cfg.State.GCInterval.Duration > 0 {
+		go m.gcLoop(ctx)
 	}
 	go m.fanoutLoop(ctx)
 	go m.exchangeLoop(ctx)
@@ -540,6 +549,28 @@ func (m *Manager) enqueuePersist(entry state.Entry) {
 	case m.persistCh <- entry:
 	default:
 		tlog.Warn("persist buffer full, dropping write", "key", entry.Key)
+	}
+}
+
+// gcLoop periodically runs tombstone garbage collection on the state map.
+// Removed keys are also deleted from the persistent store.
+func (m *Manager) gcLoop(ctx context.Context) {
+	ttl := m.cfg.State.TombstoneTTL.Duration
+	interval := m.cfg.State.GCInterval.Duration
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			removed := m.stateMap.GC(ttl)
+			for _, key := range removed {
+				state.DeleteEntry(m.store, key)
+			}
+		case <-ctx.Done():
+			return
+		case <-m.done:
+			return
+		}
 	}
 }
 

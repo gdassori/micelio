@@ -32,7 +32,8 @@ func (m *Manager) sendStateSyncRequestTo(p *Peer) {
 		return
 	}
 
-	payload, err := proto.Marshal(&pb.StateSyncRequest{})
+	digest := m.stateMap.Digest()
+	payload, err := proto.Marshal(&pb.StateSyncRequest{Known: digest})
 	if err != nil {
 		sslog.Error("marshal state_sync_request", "err", err)
 		return
@@ -55,40 +56,45 @@ func (m *Manager) sendStateSyncRequestTo(p *Peer) {
 
 	select {
 	case p.sendCh <- envBytes:
-		sslog.Debug("sent state_sync_request", "peer", formatNodeIDShort(p.NodeID))
+		sslog.Debug("sent state_sync_request", "peer", formatNodeIDShort(p.NodeID), "digest_nodes", len(digest))
 	default:
 		sslog.Warn("send buffer full, dropping state_sync_request", "peer", formatNodeIDShort(p.NodeID))
 	}
 }
 
-// sendStateSyncResponseTo sends a full state snapshot to a single peer.
-func (m *Manager) sendStateSyncResponseTo(p *Peer) {
+// sendStateSyncResponseTo sends state entries the peer is missing, based on
+// the version vector digest it provided. If known is nil/empty, all entries
+// are sent (backward compatible with fresh nodes).
+func (m *Manager) sendStateSyncResponseTo(p *Peer, known map[string]uint64) {
 	if m.stateMap == nil {
 		return
 	}
 
-	snapshot := m.stateMap.Snapshot()
-	if len(snapshot) == 0 {
+	delta := m.stateMap.SnapshotDelta(known)
+	if len(delta) == 0 {
 		sslog.Debug("skipping empty state_sync_response", "peer", formatNodeIDShort(p.NodeID))
 		return
 	}
 
 	// Cap entries to prevent oversized responses.
-	if len(snapshot) > maxStateSyncEntries {
+	if len(delta) > maxStateSyncEntries {
 		sslog.Warn("truncating state_sync_response",
 			"peer", formatNodeIDShort(p.NodeID),
-			"total", len(snapshot),
+			"total", len(delta),
 			"sending", maxStateSyncEntries)
-		snapshot = snapshot[:maxStateSyncEntries]
+		delta = delta[:maxStateSyncEntries]
 	}
 
-	pbEntries := make([]*pb.StateEntry, len(snapshot))
-	for i, e := range snapshot {
+	pbEntries := make([]*pb.StateEntry, len(delta))
+	for i, e := range delta {
 		pbEntries[i] = &pb.StateEntry{
-			Key:       e.Key,
-			Value:     e.Value,
-			LamportTs: e.LamportTs,
-			NodeId:    e.NodeID,
+			Key:          e.Key,
+			Value:        e.Value,
+			LamportTs:    e.LamportTs,
+			NodeId:       e.NodeID,
+			Deleted:      e.Deleted,
+			Signature:    e.Signature,
+			AuthorPubkey: e.AuthorPubkey,
 		}
 	}
 
@@ -115,7 +121,7 @@ func (m *Manager) sendStateSyncResponseTo(p *Peer) {
 
 	select {
 	case p.sendCh <- envBytes:
-		sslog.Debug("sent state_sync_response", "peer", formatNodeIDShort(p.NodeID), "entries", len(snapshot))
+		sslog.Debug("sent state_sync_response", "peer", formatNodeIDShort(p.NodeID), "entries", len(delta))
 	default:
 		sslog.Warn("send buffer full, dropping state_sync_response", "peer", formatNodeIDShort(p.NodeID))
 	}
@@ -123,12 +129,12 @@ func (m *Manager) sendStateSyncResponseTo(p *Peer) {
 
 // stateSyncRequestHandler returns the callback for incoming StateSyncRequest.
 // It enforces a per-peer cooldown to prevent amplification attacks.
-func (m *Manager) stateSyncRequestHandler() func(fromPeerID string) {
+func (m *Manager) stateSyncRequestHandler() func(fromPeerID string, known map[string]uint64) {
 	var (
 		mu       sync.Mutex
 		lastSync = make(map[string]time.Time)
 	)
-	return func(fromPeerID string) {
+	return func(fromPeerID string, known map[string]uint64) {
 		now := time.Now()
 		mu.Lock()
 		if last, ok := lastSync[fromPeerID]; ok && now.Sub(last) < stateSyncRequestCooldown {
@@ -139,12 +145,12 @@ func (m *Manager) stateSyncRequestHandler() func(fromPeerID string) {
 		lastSync[fromPeerID] = now
 		mu.Unlock()
 
-		sslog.Debug("received state_sync_request", "from", formatNodeIDShort(fromPeerID))
+		sslog.Debug("received state_sync_request", "from", formatNodeIDShort(fromPeerID), "digest_nodes", len(known))
 		m.mu.Lock()
 		p, ok := m.peers[fromPeerID]
 		m.mu.Unlock()
 		if ok {
-			go m.sendStateSyncResponseTo(p)
+			go m.sendStateSyncResponseTo(p, known)
 		}
 	}
 }
@@ -155,10 +161,13 @@ func (m *Manager) stateSyncResponseHandler() func(fromPeerID string, entries []*
 		sslog.Debug("received state_sync_response", "from", formatNodeIDShort(fromPeerID), "entries", len(entries))
 		for _, pbEntry := range entries {
 			entry := state.Entry{
-				Key:       pbEntry.Key,
-				Value:     pbEntry.Value,
-				LamportTs: pbEntry.LamportTs,
-				NodeID:    pbEntry.NodeId,
+				Key:          pbEntry.Key,
+				Value:        pbEntry.Value,
+				LamportTs:    pbEntry.LamportTs,
+				NodeID:       pbEntry.NodeId,
+				Deleted:      pbEntry.Deleted,
+				Signature:    pbEntry.Signature,
+				AuthorPubkey: pbEntry.AuthorPubkey,
 			}
 			if m.stateMap.Merge(entry) {
 				m.enqueuePersist(entry)
