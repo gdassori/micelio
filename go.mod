@@ -3,7 +3,7 @@ module micelio
 go 1.26
 
 require (
-	filippo.io/edwards25519 v1.1.0
+	filippo.io/edwards25519 v1.2.0
 	github.com/BurntSushi/toml v1.6.0
 	github.com/flynn/noise v1.1.0
 	github.com/google/uuid v1.6.0
